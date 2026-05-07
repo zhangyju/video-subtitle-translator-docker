@@ -233,6 +233,12 @@ const HTML_CONTENT = `<!DOCTYPE html>
                 <p class="hint">支持: MP4, WebM, MP3, WAV, OGG (最大 500MB)</p>
             </div>
 
+            <div id="selectedFileInfo" style="margin-top: 15px; padding: 12px; background: #f0f0ff; border-radius: 6px; display: none;">
+                <div style="color: #667eea; font-weight: 600; margin-bottom: 5px;">✓ 已选择文件：</div>
+                <div id="fileName" style="color: #333; word-break: break-all; font-size: 14px;"></div>
+                <div id="fileSize" style="color: #999; font-size: 12px; margin-top: 3px;"></div>
+            </div>
+
             <div class="form-group" style="margin-top: 20px;">
                 <label>视频标题 (可选)</label>
                 <input type="text" id="title" placeholder="给你的视频起个名字">
@@ -327,7 +333,41 @@ const HTML_CONTENT = `<!DOCTYPE html>
             e.preventDefault();
             uploadArea.classList.remove('dragover');
             fileInput.files = e.dataTransfer.files;
+            showSelectedFile();
         });
+
+        // 文件选择变化事件
+        fileInput.addEventListener('change', showSelectedFile);
+
+        function showSelectedFile() {
+            const file = fileInput.files[0];
+            const fileInfo = document.getElementById('selectedFileInfo');
+            
+            if (file) {
+                const fileName = document.getElementById('fileName');
+                const fileSize = document.getElementById('fileSize');
+                
+                fileName.textContent = file.name;
+                fileSize.textContent = '大小: ' + formatFileSize(file.size);
+                fileInfo.style.display = 'block';
+                
+                // 自动填充标题（如果用户没有输入的话）
+                const titleInput = document.getElementById('title');
+                if (!titleInput.value) {
+                    titleInput.value = file.name.replace(/\\.[^/.]+$/, '');
+                }
+            } else {
+                fileInfo.style.display = 'none';
+            }
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
 
         // 上传文件
         async function uploadFile() {
