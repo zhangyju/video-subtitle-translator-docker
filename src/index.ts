@@ -1,463 +1,492 @@
-import { videosHandler } from './routes/videos';
-import { uploadHandler } from './routes/upload';
-import { subtitleHandler } from './routes/subtitles';
-import { translateHandler } from './routes/translate';
-import { metricsHandler } from './routes/metrics';
+import { Container, getContainer } from "@cloudflare/containers";
 
-// Add CORS headers
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS, HEAD',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept, X-Requested-With',
-  'Access-Control-Max-Age': '86400',
-};
-
-function jsonResponse(data: any, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-  });
-}
-
-function getDashboardHTML() {
-  return `<!DOCTYPE html>
-<html>
+const HTML_CONTENT = `<!DOCTYPE html>
+<html lang="zh-CN">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Video Subtitle Translator</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif; background: #f5f5f5; }
-    .app { display: flex; flex-direction: column; height: 100vh; }
-    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px 30px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-    .header h1 { margin: 0 0 10px 0; font-size: 28px; }
-    .nav { display: flex; gap: 10px; margin-top: 10px; }
-    .nav button { background: rgba(255,255,255,0.2); color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; transition: all 0.2s; }
-    .nav button:hover { background: rgba(255,255,255,0.3); }
-    .nav button.active { background: rgba(255,255,255,0.4); }
-    .main { flex: 1; padding: 20px 30px; overflow-y: auto; }
-    .page { display: none; }
-    .page.active { display: block; }
-    .upload-area { background: white; border-radius: 8px; padding: 30px; text-align: center; border: 2px dashed #667eea; cursor: pointer; margin-bottom: 20px; transition: all 0.3s; }
-    .upload-area:hover { border-color: #764ba2; background: #f9f8ff; }
-    .upload-area.dragover { border-color: #667eea; background: #f0f0ff; }
-    .upload-area input { display: none; }
-    .form-group { margin-bottom: 15px; }
-    .form-group label { display: block; margin-bottom: 8px; font-weight: 500; color: #333; }
-    .form-group input { width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
-    .form-group input:focus { outline: none; border-color: #667eea; }
-    .languages { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 15px; }
-    .lang-checkbox { display: flex; align-items: center; padding: 8px; background: white; border-radius: 4px; border: 1px solid #e0e0e0; }
-    .lang-checkbox:hover { border-color: #667eea; }
-    .lang-checkbox input { margin-right: 8px; cursor: pointer; }
-    .lang-checkbox label { margin: 0; cursor: pointer; flex: 1; }
-    .btn { padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; }
-    .btn-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
-    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4); }
-    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-    .card { background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-    .card h2 { margin: 0 0 15px 0; font-size: 18px; color: #333; }
-    .alert-success { background: #e8f5e9; border-left: 4px solid #4caf50; color: #2e7d32; padding: 12px; border-radius: 4px; margin-bottom: 15px; }
-    .alert-error { background: #ffebee; border-left: 4px solid #f44336; color: #c62828; padding: 12px; border-radius: 4px; margin-bottom: 15px; }
-     .video-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 15px; }
-     .video-card { background: white; border-radius: 8px; padding: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-     .video-title { font-weight: 600; color: #333; margin-bottom: 8px; }
-     .video-info { font-size: 12px; color: #666; }
-     .progress-container { margin-top: 20px; display: none; }
-     .progress-container.active { display: block; }
-     .progress-item { margin-bottom: 15px; }
-     .progress-label { font-size: 12px; font-weight: 600; color: #333; margin-bottom: 6px; display: flex; justify-content: space-between; }
-     .progress-bar { background: #e0e0e0; height: 8px; border-radius: 4px; overflow: hidden; }
-     .progress-fill { background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); height: 100%; transition: width 0.3s ease; }
-     .language-progress { margin-left: 10px; margin-top: 10px; padding: 8px; background: #f5f5f5; border-radius: 4px; }
-     .language-progress-item { margin-bottom: 10px; font-size: 12px; }
-     .completion-message { color: #4caf50; font-weight: 600; margin-top: 10px; }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>视频字幕翻译器</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+        .header h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+        .header p {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }
+        .card h2 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 20px;
+        }
+        .upload-area {
+            border: 2px dashed #667eea;
+            border-radius: 8px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: #f8f9ff;
+        }
+        .upload-area:hover {
+            border-color: #764ba2;
+            background: #f0f0ff;
+        }
+        .upload-area.dragover {
+            border-color: #667eea;
+            background: #e8e8ff;
+        }
+        .upload-area p {
+            color: #667eea;
+            font-size: 16px;
+            margin-bottom: 10px;
+        }
+        .upload-area .hint {
+            color: #999;
+            font-size: 12px;
+        }
+        #fileInput {
+            display: none;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+            font-size: 14px;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        .languages {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .lang-checkbox {
+            display: flex;
+            align-items: center;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            cursor: pointer;
+            background: white;
+        }
+        .lang-checkbox:hover {
+            border-color: #667eea;
+            background: #f8f9ff;
+        }
+        .lang-checkbox input {
+            margin-right: 8px;
+            cursor: pointer;
+        }
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .message {
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-size: 14px;
+        }
+        .message.success {
+            background: #e8f5e9;
+            color: #2e7d32;
+            border-left: 4px solid #4caf50;
+        }
+        .message.error {
+            background: #ffebee;
+            color: #c62828;
+            border-left: 4px solid #f44336;
+        }
+        .progress-container {
+            display: none;
+            margin-top: 20px;
+        }
+        .progress-container.active {
+            display: block;
+        }
+        .progress-item {
+            margin-bottom: 15px;
+        }
+        .progress-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 6px;
+        }
+        .progress-bar {
+            background: #e0e0e0;
+            height: 8px;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            height: 100%;
+            transition: width 0.3s ease;
+            width: 0%;
+        }
+        .video-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .video-card {
+            background: #f8f9ff;
+            border-radius: 8px;
+            padding: 15px;
+            border: 1px solid #e0e0f0;
+        }
+        .video-title {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+            word-break: break-word;
+        }
+        .video-info {
+            font-size: 12px;
+            color: #666;
+            line-height: 1.6;
+        }
+        .empty {
+            text-align: center;
+            color: #999;
+            padding: 40px;
+            font-size: 14px;
+        }
+    </style>
 </head>
 <body>
-  <div class="app">
-    <div class="header">
-      <h1>🎬 Video Subtitle Translator</h1>
-      <div class="nav">
-        <button class="nav-btn active" onclick="showPage(event,'upload')">⬆️ Upload</button>
-        <button class="nav-btn" onclick="showPage(event,'videos')">📺 Videos</button>
-      </div>
-    </div>
-    <div class="main">
-      <div class="page active" id="upload">
-        <div class="card">
-          <h2>Upload Video or Audio</h2>
-          <div id="uploadMessage"></div>
-          <div class="upload-area" id="uploadArea" onclick="document.getElementById('fileInput').click()" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)">
-            <input type="file" id="fileInput" accept="video/*,audio/*" onchange="handleFileSelect(event)">
-            <p style="font-size: 14px; color: #667eea; cursor: pointer;">📤 Click to upload or drag files here</p>
-            <p style="font-size: 12px; color: #999; margin-top: 8px;">Supported: MP4, WebM, MP3, WAV, OGG (Max 100MB, recommended ≤50MB)</p>
-          </div>
-          <div class="form-group">
-            <label>Video Title (Optional)</label>
-            <input type="text" id="title" placeholder="Give your video a title">
-          </div>
-          <div class="form-group">
-            <label>Target Languages</label>
-            <div class="languages">
-              <div class="lang-checkbox"><input type="checkbox" value="zh" id="zh" checked><label for="zh">Chinese</label></div>
-              <div class="lang-checkbox"><input type="checkbox" value="es" id="es" checked><label for="es">Spanish</label></div>
-              <div class="lang-checkbox"><input type="checkbox" value="fr" id="fr" checked><label for="fr">French</label></div>
-              <div class="lang-checkbox"><input type="checkbox" value="de" id="de"><label for="de">German</label></div>
-              <div class="lang-checkbox"><input type="checkbox" value="ja" id="ja"><label for="ja">Japanese</label></div>
-              <div class="lang-checkbox"><input type="checkbox" value="ko" id="ko"><label for="ko">Korean</label></div>
-              <div class="lang-checkbox"><input type="checkbox" value="pt" id="pt"><label for="pt">Portuguese</label></div>
-              <div class="lang-checkbox"><input type="checkbox" value="ru" id="ru"><label for="ru">Russian</label></div>
-            </div>
-          </div>
-           <button class="btn btn-primary" id="uploadBtn" onclick="uploadFile()">Upload & Process</button>
-           <div class="progress-container" id="progressContainer">
-             <div class="progress-item">
-               <div class="progress-label">
-                 <span>Uploading</span>
-                 <span id="uploadProgress">0%</span>
-               </div>
-               <div class="progress-bar">
-                 <div class="progress-fill" id="uploadBar" style="width: 0%"></div>
-               </div>
-             </div>
-             <div class="progress-item">
-               <div class="progress-label">
-                 <span>Transcribing</span>
-                 <span id="transcriptionProgress">0%</span>
-               </div>
-               <div class="progress-bar">
-                 <div class="progress-fill" id="transcriptionBar" style="width: 0%"></div>
-               </div>
-             </div>
-             <div class="progress-item" id="translationContainer" style="display: none;">
-               <div class="progress-label">
-                 <span>Translating</span>
-               </div>
-               <div id="languageProgressList" class="language-progress"></div>
-             </div>
-             <div class="completion-message" id="completionMessage" style="display: none;"></div>
-           </div>
-         </div>
-       </div>
-      <div class="page" id="videos">
-        <div class="card">
-          <h2>Your Videos</h2>
-          <div id="videosList">Loading videos...</div>
+    <div class="container">
+        <div class="header">
+            <h1>🎬 视频字幕翻译器</h1>
+            <p>支持 50MB+ 大文件上传</p>
         </div>
-      </div>
+
+        <!-- 上传标签页 -->
+        <div class="card">
+            <h2>📤 上传视频</h2>
+            <div id="uploadMessage"></div>
+            
+            <div class="upload-area" id="uploadArea">
+                <input type="file" id="fileInput" accept="video/*,audio/*">
+                <p>点击或拖拽文件到此处上传</p>
+                <p class="hint">支持: MP4, WebM, MP3, WAV, OGG (最大 500MB)</p>
+            </div>
+
+            <div class="form-group" style="margin-top: 20px;">
+                <label>视频标题 (可选)</label>
+                <input type="text" id="title" placeholder="给你的视频起个名字">
+            </div>
+
+            <div class="form-group">
+                <label>翻译语言</label>
+                <div class="languages">
+                    <label class="lang-checkbox">
+                        <input type="checkbox" value="zh" checked> 中文
+                    </label>
+                    <label class="lang-checkbox">
+                        <input type="checkbox" value="en"> 英文
+                    </label>
+                    <label class="lang-checkbox">
+                        <input type="checkbox" value="es"> 西班牙文
+                    </label>
+                    <label class="lang-checkbox">
+                        <input type="checkbox" value="fr"> 法文
+                    </label>
+                    <label class="lang-checkbox">
+                        <input type="checkbox" value="de"> 德文
+                    </label>
+                    <label class="lang-checkbox">
+                        <input type="checkbox" value="ja"> 日文
+                    </label>
+                    <label class="lang-checkbox">
+                        <input type="checkbox" value="ko"> 韩文
+                    </label>
+                    <label class="lang-checkbox">
+                        <input type="checkbox" value="pt"> 葡萄牙文
+                    </label>
+                </div>
+            </div>
+
+            <button class="btn btn-primary" id="uploadBtn" onclick="uploadFile()">上传并处理</button>
+
+            <div class="progress-container" id="progressContainer">
+                <div class="progress-item">
+                    <div class="progress-label">
+                        <span>上传进度</span>
+                        <span id="uploadPercent">0%</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="uploadProgress"></div>
+                    </div>
+                </div>
+                <div class="progress-item">
+                    <div class="progress-label">
+                        <span>处理进度</span>
+                        <span id="processPercent">0%</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="processProgress"></div>
+                    </div>
+                </div>
+                <div id="completionMessage" style="color: #4caf50; font-weight: 600; margin-top: 10px; display: none;">
+                    ✅ 处理完成！
+                </div>
+            </div>
+        </div>
+
+        <!-- 视频列表标签页 -->
+        <div class="card">
+            <h2>📺 视频列表</h2>
+            <button class="btn btn-primary" onclick="loadVideos()" style="margin-bottom: 20px;">刷新列表</button>
+            <div id="videosList" class="empty">加载中...</div>
+        </div>
     </div>
-  </div>
-  <script>
-    let currentVideoId=null,progressInterval=null,selectedLanguages=[],pollCount=0;
-    function showPage(e,n){document.querySelectorAll('.page').forEach(t=>t.classList.remove('active')),document.getElementById(n).classList.add('active'),document.querySelectorAll('.nav-btn').forEach(t=>t.classList.remove('active')),e.target.classList.add('active'),'videos'===n&&loadVideos()}
-    function handleDragOver(e){e.preventDefault(),document.getElementById('uploadArea').classList.add('dragover')}
-    function handleDragLeave(e){e.preventDefault(),document.getElementById('uploadArea').classList.remove('dragover')}
-    function handleDrop(e){e.preventDefault(),e.stopPropagation(),document.getElementById('uploadArea').classList.remove('dragover');const t=e.dataTransfer.files;t.length&&(document.getElementById('fileInput').files=t,handleFileSelect({target:{files:t}}))}
-    function handleFileSelect(e){const t=e.target.files[0];if(t){const a=(t.size/1024/1024).toFixed(2);document.getElementById('uploadMessage').innerHTML='✅ Selected: '+t.name+' ('+a+'MB)'}}
-    function updateProgress(e,t){const a=document.getElementById(e+'Bar'),o=document.getElementById(e+'Progress');a&&(a.style.width=t+'%'),o&&(o.textContent=t+'%')}
-    function updateLanguageProgress(e,t){let a=document.getElementById('lang_'+e);a?a.querySelector('.lang-percent').textContent=t+'%':document.getElementById('languageProgressList').innerHTML+='<div class="language-progress-item" id="lang_'+e+'">'+e+': <span class="lang-percent">'+t+'%</span></div>'}
-    function pollProgress(){if(!currentVideoId)return;fetch('/api/progress/'+currentVideoId).then(e=>e.text()).then(e=>{try{const t=JSON.parse(e);if(t.success){pollCount++;const a=t.data;console.log('Poll #'+pollCount,a);const o=a.status||'processing';if('uploading'===o)updateProgress('upload',50),updateProgress('transcription',0);else if('processing'===o)updateProgress('upload',100),a.transcribed?(updateProgress('transcription',90),document.getElementById('translationContainer').style.display='block',a.translationsCount>0&&selectedLanguages.forEach((e,t)=>{const i=Math.round((t+1)/selectedLanguages.length*100);updateLanguageProgress(e,i)})):updateProgress('transcription',50);else if('completed'===o)updateProgress('upload',100),updateProgress('transcription',100),selectedLanguages.forEach(e=>updateLanguageProgress(e,100)),document.getElementById('completionMessage').style.display='block',document.getElementById('completionMessage').textContent='✅ Completed!',clearInterval(progressInterval)}else console.log('API error:',t.error)}catch(t){console.error('JSON parse error:',e.substring(0,100))}}).catch(e=>console.error('Poll error:',e.message))}
-    async function uploadFile(){const e=document.getElementById('fileInput').files[0];if(!e)return void alert('Please select file');const MAX_SIZE=100*1024*1024;if(e.size>MAX_SIZE){const t=(e.size/1024/1024).toFixed(1);return void alert('File too large ('+t+'MB). Max size is 100MB. For Cloudflare Workers, recommended max is 50MB.')}selectedLanguages=Array.from(document.querySelectorAll('.lang-checkbox input:checked')).map(e=>e.value);if(!selectedLanguages.length)return void alert('Select languages');const t=new FormData;t.append('file',e),t.append('title',document.getElementById('title').value||e.name),t.append('languages',JSON.stringify(selectedLanguages));try{document.getElementById('uploadBtn').disabled=!0,document.getElementById('uploadMessage').innerHTML='<div class="alert-success">⏳ Uploading '+e.name+'...</div>',document.getElementById('progressContainer').classList.add('active'),document.getElementById('translationContainer').style.display='none',document.getElementById('completionMessage').style.display='none',pollCount=0;const a=await fetch('/api/upload',{method:'POST',credentials:'include',body:t});console.log('Response status:',a.status);const o=await a.text();console.log('Response length:',o.length,'First chars:',o.substring(0,100));if(a.status!==201&&a.status!==200)return void(document.getElementById('uploadMessage').innerHTML='<div class="alert-error">❌ Server returned '+a.status+'</div>');try{const i=JSON.parse(o);if(i.success)currentVideoId=i.data.id,updateProgress('upload',25),progressInterval=setInterval(pollProgress,800),pollProgress(),console.log('✅ Video ID:',currentVideoId);else document.getElementById('uploadMessage').innerHTML='<div class="alert-error">❌ '+(i.error||'Upload failed')+'</div>',document.getElementById('progressContainer').classList.remove('active')}catch(e){console.error('Parse error:',e),document.getElementById('uploadMessage').innerHTML='<div class="alert-error">❌ Invalid response</div>',document.getElementById('progressContainer').classList.remove('active')}}catch(e){console.error('Error:',e),document.getElementById('uploadMessage').innerHTML='<div class="alert-error">❌ '+e.message+'</div>',document.getElementById('progressContainer').classList.remove('active')}finally{document.getElementById('uploadBtn').disabled=!1}}
-    async function loadVideos(){try{const e=await fetch('/api/videos'),t=await e.json();if(t.data&&t.data.videos.length){let a='<div class="video-grid">';t.data.videos.forEach(e=>{a+='<div class="video-card"><div class="video-title">'+(e.title||'Untitled')+'</div><div class="video-info">Status: '+e.status+'</div></div>'}),a+='</div>',document.getElementById('videosList').innerHTML=a}else document.getElementById('videosList').innerHTML='No videos yet. Upload one!'}catch(e){document.getElementById('videosList').innerHTML='Error: '+e.message}}
-  </script>
+
+    <script>
+        let currentVideoId = null;
+        let selectedLanguages = [];
+        let progressInterval = null;
+
+        // 文件拖拽
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+
+        uploadArea.addEventListener('click', () => fileInput.click());
+        
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            fileInput.files = e.dataTransfer.files;
+        });
+
+        // 上传文件
+        async function uploadFile() {
+            const file = fileInput.files[0];
+            if (!file) {
+                alert('请选择文件');
+                return;
+            }
+
+            // 获取选中的语言
+            selectedLanguages = Array.from(document.querySelectorAll('.lang-checkbox input:checked'))
+                .map(el => el.value);
+            
+            if (!selectedLanguages.length) {
+                alert('请选择至少一种语言');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('title', document.getElementById('title').value || file.name);
+            formData.append('languages', JSON.stringify(selectedLanguages));
+
+            try {
+                document.getElementById('uploadBtn').disabled = true;
+                document.getElementById('uploadMessage').innerHTML = 
+                    '<div class="message success">⏳ 上传中...</div>';
+                document.getElementById('progressContainer').classList.add('active');
+
+                const response = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    currentVideoId = data.data.id;
+                    document.getElementById('uploadMessage').innerHTML = 
+                        '<div class="message success">✅ 上传成功！处理中...</div>';
+                    
+                    // 开始轮询进度
+                    pollProgress();
+                    progressInterval = setInterval(pollProgress, 1000);
+                } else {
+                    document.getElementById('uploadMessage').innerHTML = 
+                        \`<div class="message error">❌ \${data.error}</div>\`;
+                    document.getElementById('progressContainer').classList.remove('active');
+                }
+            } catch (error) {
+                document.getElementById('uploadMessage').innerHTML = 
+                    \`<div class="message error">❌ 错误: \${error.message}</div>\`;
+                document.getElementById('progressContainer').classList.remove('active');
+            } finally {
+                document.getElementById('uploadBtn').disabled = false;
+            }
+        }
+
+        // 轮询进度
+        async function pollProgress() {
+            if (!currentVideoId) return;
+
+            try {
+                const response = await fetch(\`/api/progress/\${currentVideoId}\`);
+                const data = await response.json();
+
+                if (data.success) {
+                    const status = data.data.status || 'processing';
+                    
+                    // 更新上传进度
+                    document.getElementById('uploadProgress').style.width = '100%';
+                    document.getElementById('uploadPercent').textContent = '100%';
+
+                    // 更新处理进度
+                    if (status === 'processing') {
+                        let processPercent = 30;
+                        if (data.data.transcribed) processPercent = 60;
+                        if (data.data.translationsCount > 0) {
+                            processPercent = 60 + (data.data.translationsCount / selectedLanguages.length) * 30;
+                        }
+                        document.getElementById('processProgress').style.width = processPercent + '%';
+                        document.getElementById('processPercent').textContent = Math.round(processPercent) + '%';
+                    } else if (status === 'completed') {
+                        document.getElementById('processProgress').style.width = '100%';
+                        document.getElementById('processPercent').textContent = '100%';
+                        document.getElementById('completionMessage').style.display = 'block';
+                        clearInterval(progressInterval);
+                    }
+                }
+            } catch (error) {
+                console.error('Progress error:', error);
+            }
+        }
+
+        // 加载视频列表
+        async function loadVideos() {
+            try {
+                const response = await fetch('/api/videos');
+                const data = await response.json();
+
+                if (data.data && data.data.videos && data.data.videos.length > 0) {
+                    let html = '';
+                    data.data.videos.forEach(video => {
+                        html += \`
+                            <div class="video-card">
+                                <div class="video-title">\${video.title || '无标题'}</div>
+                                <div class="video-info">
+                                    <div>状态: \${video.status}</div>
+                                    <div>上传时间: \${new Date(video.createdAt).toLocaleDateString()}</div>
+                                </div>
+                            </div>
+                        \`;
+                    });
+                    document.getElementById('videosList').innerHTML = html;
+                } else {
+                    document.getElementById('videosList').innerHTML = 
+                        '<div class="empty">暂无视频，上传一个试试吧！</div>';
+                }
+            } catch (error) {
+                document.getElementById('videosList').innerHTML = 
+                    \`<div class="empty">❌ 加载失败: \${error.message}</div>\`;
+            }
+        }
+
+        // 页面加载时获取视频列表
+        loadVideos();
+    </script>
 </body>
 </html>`;
+
+export class VideoSubtitleContainer extends Container {
+  defaultPort = 3000;
+  sleepAfter = "30m";
 }
 
 export default {
-  fetch: async (request: Request, env: any, _ctx: any) => {
-    const url = new URL(request.url);
-    const pathname = url.pathname;
-    const method = request.method;
-
-    // Handle preflight
-    if (method === 'OPTIONS') {
-      return new Response(null, { 
-        status: 204,
-        headers: corsHeaders
-      });
-    }
-
+  async fetch(request: Request, env: any, _ctx: any) {
     try {
-      // Serve frontend assets from R2
-      if (pathname.startsWith('/assets/') || pathname === '/') {
-        try {
-          let r2Path: string;
-          let contentType = 'application/octet-stream';
-          
-          if (pathname === '/') {
-            r2Path = 'static/index.html';
-            contentType = 'text/html; charset=utf-8';
-          } else {
-            r2Path = `static${pathname}`;
-            if (pathname.endsWith('.js')) contentType = 'application/javascript';
-            else if (pathname.endsWith('.css')) contentType = 'text/css';
-            else if (pathname.endsWith('.map')) contentType = 'application/json';
-          }
-          
-          const object = await env.R2_BUCKET.get(r2Path);
-          if (object) {
-            return new Response(object.body, {
-              status: 200,
-              headers: {
-                'Content-Type': contentType,
-                'Cache-Control': 'public, max-age=3600',
-                ...corsHeaders
-              }
-            });
-          }
-        } catch (error) {
-          console.error(`Error fetching ${pathname}:`, error);
-        }
-        
-        // Fallback to dashboard for root path
-        if (pathname === '/') {
-          return new Response(getDashboardHTML(), {
-            status: 200,
-            headers: { ...corsHeaders, 'Content-Type': 'text/html; charset=utf-8' }
-          });
-        }
-        
-        return jsonResponse({ error: 'Asset not found' }, 404);
-      }
-
-      // Root path and non-API routes - serve SPA
-      if (!pathname.startsWith('/api') && !pathname.startsWith('/health')) {
-        const acceptHeader = request.headers.get('Accept') || '';
-        
-        // 如果明确要求JSON，返回API信息
-        if (acceptHeader.includes('application/json')) {
-          return jsonResponse({
-            success: true,
-            message: 'Video Subtitle Translator API',
-            version: '1.0.0',
-            endpoints: {
-              health: 'GET /health',
-              videos: {
-                list: 'GET /api/videos',
-                detail: 'GET /api/videos/:id',
-                upload: 'POST /api/upload',
-                delete: 'DELETE /api/videos/:id',
-                subtitle: 'GET /api/videos/:id/subtitle',
-                translate: 'POST /api/videos/:id/translate'
-              }
-            },
-            app: 'https://subtitle.myzhangyujie.com/',
-            documentation: 'https://github.com/yourusername/video-subtitle-translator'
-          });
-        }
-        
-        // 为 SPA 返回 HTML（带备用内容）
-        return new Response(getDashboardHTML(), {
+      const url = new URL(request.url);
+      
+      // Serve HTML at root
+      if (url.pathname === '/') {
+        return new Response(HTML_CONTENT, {
           status: 200,
-          headers: { ...corsHeaders, 'Content-Type': 'text/html; charset=utf-8' }
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
         });
       }
 
-      // Health check
-      if (pathname === '/health') {
-        return new Response('OK', {
-          status: 200,
-          headers: { ...corsHeaders, 'Content-Type': 'text/plain' }
-        });
-      }
-
-      // Upload handler
-      if (method === 'POST' && pathname === '/api/upload') {
-        const response = await uploadHandler(request, env, _ctx);
-        // Add CORS headers
-        const newResponse = new Response(response.body, response);
-        Object.entries(corsHeaders).forEach(([key, value]) => {
-          newResponse.headers.set(key, value);
-        });
-        return newResponse;
-      }
-
-      // Videos list
-      if (method === 'GET' && pathname === '/api/videos') {
-        const response = await videosHandler.list(request, env);
-        const newResponse = new Response(response.body, response);
-        Object.entries(corsHeaders).forEach(([key, value]) => {
-          newResponse.headers.set(key, value);
-        });
-        return newResponse;
-      }
-
-      // Videos detail and delete
-      const videoDetailMatch = pathname.match(/^\/api\/videos\/([^/]+)$/);
-      if (videoDetailMatch) {
-        const videoId = videoDetailMatch[1];
-        let response: Response;
-        
-        if (method === 'GET') {
-          response = await videosHandler.detail(request, env, videoId);
-        } else if (method === 'DELETE') {
-          response = await videosHandler.delete(request, env, videoId);
-        } else {
-          return jsonResponse({ success: false, error: 'Method not allowed' }, 405);
+      // Forward all other requests to container
+      const container = getContainer(env.CONTAINER, "default");
+      const response = await container.fetch(request);
+      return response;
+    } catch (error) {
+      console.error("[Error]", error);
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: error instanceof Error ? error.message : "Request failed",
+        }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
         }
-
-        const newResponse = new Response(response.body, response);
-        Object.entries(corsHeaders).forEach(([key, value]) => {
-          newResponse.headers.set(key, value);
-        });
-        return newResponse;
-      }
-
-      // Subtitles
-      const subtitleMatch = pathname.match(/^\/api\/videos\/([^/]+)\/subtitle$/);
-      if (method === 'GET' && subtitleMatch) {
-        const videoId = subtitleMatch[1];
-        const response = await subtitleHandler.get(request, env, videoId);
-        const newResponse = new Response(response.body, response);
-        Object.entries(corsHeaders).forEach(([key, value]) => {
-          newResponse.headers.set(key, value);
-        });
-        return newResponse;
-      }
-
-      // Translate
-      const translateMatch = pathname.match(/^\/api\/videos\/([^/]+)\/translate$/);
-      if (method === 'POST' && translateMatch) {
-        const videoId = translateMatch[1];
-        const response = await translateHandler.request(request, env, videoId);
-        const newResponse = new Response(response.body, response);
-        Object.entries(corsHeaders).forEach(([key, value]) => {
-          newResponse.headers.set(key, value);
-        });
-        return newResponse;
-      }
-
-      // Metrics routes
-      if (method === 'GET' && pathname === '/api/metrics/history') {
-        const response = await metricsHandler.history(request, env);
-        const newResponse = new Response(response.body, response);
-        Object.entries(corsHeaders).forEach(([key, value]) => {
-          newResponse.headers.set(key, value);
-        });
-        return newResponse;
-      }
-
-      if (method === 'GET' && pathname === '/api/metrics/stats') {
-        const response = await metricsHandler.stats(request, env);
-        const newResponse = new Response(response.body, response);
-        Object.entries(corsHeaders).forEach(([key, value]) => {
-          newResponse.headers.set(key, value);
-        });
-        return newResponse;
-      }
-
-      if (method === 'GET' && pathname === '/api/metrics/performance') {
-        const response = await metricsHandler.performance(request, env);
-        const newResponse = new Response(response.body, response);
-        Object.entries(corsHeaders).forEach(([key, value]) => {
-          newResponse.headers.set(key, value);
-        });
-        return newResponse;
-      }
-
-      if (method === 'GET' && pathname === '/api/metrics/analytics') {
-        const response = await metricsHandler.analytics(request, env);
-        const newResponse = new Response(response.body, response);
-        Object.entries(corsHeaders).forEach(([key, value]) => {
-          newResponse.headers.set(key, value);
-        });
-        return newResponse;
-      }
-
-      // Progress polling endpoint - get video status
-      const progressMatch = pathname.match(/^\/api\/progress\/([^/]+)$/);
-      if (method === 'GET' && progressMatch) {
-        const videoId = progressMatch[1];
-        try {
-          // Get video status and related info
-          const video = await env.DB.prepare(
-            'SELECT id, status, created_at FROM videos WHERE id = ?'
-          ).bind(videoId).first() as any;
-          
-          if (!video) {
-            return jsonResponse({ success: false, error: 'Video not found' }, 404);
-          }
-          
-          let transcribed = false;
-          let translationsCount = 0;
-          
-          try {
-            const transcriptions = await env.DB.prepare(
-              'SELECT COUNT(*) as count FROM transcriptions WHERE video_id = ?'
-            ).bind(videoId).first() as any;
-            transcribed = (transcriptions?.count || 0) > 0;
-          } catch (e) {
-            console.warn('Transcription query error:', e);
-          }
-          
-          try {
-            const translations = await env.DB.prepare(
-              'SELECT COUNT(*) as count FROM translations WHERE video_id = ?'
-            ).bind(videoId).first() as any;
-            translationsCount = translations?.count || 0;
-          } catch (e) {
-            console.warn('Translation query error:', e);
-          }
-          
-          return jsonResponse({
-            success: true,
-            data: {
-              videoId,
-              status: video.status,
-              transcribed,
-              translationsCount,
-              createdAt: video.created_at
-            }
-          });
-        } catch (error) {
-          console.error('Progress query error:', error);
-          return jsonResponse({ success: false, error: 'Failed to get progress' }, 500);
-        }
-      }
-
-      // File download from R2
-      const fileMatch = pathname.match(/^\/api\/r2\/(.+)$/);
-      if (method === 'GET' && fileMatch) {
-        const filePath = fileMatch[1];
-        try {
-          const object = await env.R2_BUCKET.get(filePath);
-          if (!object) {
-            return jsonResponse({ success: false, error: 'File not found' }, 404);
-          }
-
-          // Determine content type
-          let contentType = 'application/octet-stream';
-          if (filePath.endsWith('.mp4')) contentType = 'video/mp4';
-          else if (filePath.endsWith('.webm')) contentType = 'video/webm';
-          else if (filePath.endsWith('.mp3')) contentType = 'audio/mpeg';
-          else if (filePath.endsWith('.wav')) contentType = 'audio/wav';
-          else if (filePath.endsWith('.ogg')) contentType = 'audio/ogg';
-          else if (filePath.endsWith('.vtt')) contentType = 'text/vtt';
-
-          return new Response(object.body, {
-            headers: {
-              ...corsHeaders,
-              'Content-Type': contentType,
-              'Content-Disposition': `inline; filename="${filePath.split('/').pop()}"`,
-              'Cache-Control': 'max-age=86400',
-            },
-          });
-        } catch (error) {
-          return jsonResponse({ success: false, error: 'Failed to retrieve file' }, 500);
-        }
-      }
-
-      // 404 - Let Wrangler's static site serving handle non-API requests
-      return jsonResponse({ success: false, error: 'Not Found' }, 404);
-    } catch (error: any) {
-      console.error('Error:', error?.message || error);
-      return jsonResponse({
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error'
-      }, 500);
+      );
     }
   },
 };
