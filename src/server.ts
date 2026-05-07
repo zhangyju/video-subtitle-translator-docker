@@ -39,9 +39,14 @@ const upload = multer({
 
 // Routes
 app.get('/', (_req: Request, res: Response) => {
-  res.sendFile(path.join(__dirname, '../public/index.html'), (err) => {
-    if (err) {
-      res.status(404).json({ success: false, error: 'Index page not found' });
+  res.json({
+    success: true,
+    message: 'Video Subtitle Translator API',
+    endpoints: {
+      health: '/api/health',
+      upload: 'POST /api/upload',
+      videos: 'GET /api/videos',
+      progress: 'GET /api/progress/:videoId'
     }
   });
 });
