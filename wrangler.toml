@@ -8,7 +8,8 @@ compatibility_flags = ["nodejs_compat"]
 class_name = "VideoSubtitleContainer"
 image = "docker.io/lvxiaoyu/video-subtitle-translator:v1.0.9"
 instance_type = "standard-2"  # 1 vCPU, 6GB memory, 12GB disk - sufficient for video processing
-max_instances = 2
+max_instances = 5
+min_instances = 1
 
 # Durable Objects binding for container
 [[durable_objects.bindings]]
