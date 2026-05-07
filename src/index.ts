@@ -502,6 +502,11 @@ export default {
         return await handleTranscription(request, env);
       }
 
+      // Handle async transcription trigger
+      if (url.pathname.startsWith('/api/transcribe-video/') && request.method === 'POST') {
+        return await triggerTranscription(request, env);
+      }
+
       // Forward all other requests to container
       const container = getContainer(env.CONTAINER, "default");
       const response = await container.fetch(request);
@@ -554,6 +559,57 @@ async function handleTranscription(request: Request, env: Env) {
     });
   } catch (error) {
     console.error('[Transcription Error]', error);
+    return new Response(JSON.stringify({
+      success: false,
+      error: error instanceof Error ? error.message : 'Transcription failed'
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+async function triggerTranscription(request: Request, env: Env) {
+  try {
+    // This would be called by container to trigger async transcription via Worker
+    const { videoId, filePath } = await request.json() as any;
+
+    if (!videoId || !filePath) {
+      return new Response(JSON.stringify({ success: false, error: 'Missing parameters' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Read file from container storage
+    const fileContent = await fetch(`http://localhost:3000/api/get-file/${videoId}`, {
+      method: 'GET'
+    });
+
+    if (!fileContent.ok) {
+      throw new Error('Failed to fetch file from container');
+    }
+
+    const arrayBuffer = await fileContent.arrayBuffer();
+
+    // Call Cloudflare AI Whisper
+    const response = await env.AI.run('@cf/openai/whisper', {
+      audio: Array.from(new Uint8Array(arrayBuffer)),
+    }) as any;
+
+    // Return results to container
+    return new Response(JSON.stringify({
+      success: true,
+      data: {
+        text: response.result?.text || '',
+        language: response.result?.language || 'en'
+      }
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    console.error('[Async Transcription Error]', error);
     return new Response(JSON.stringify({
       success: false,
       error: error instanceof Error ? error.message : 'Transcription failed'

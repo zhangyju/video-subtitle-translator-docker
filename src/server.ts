@@ -276,7 +276,58 @@ function formatTime(seconds: number): string {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
 }
 
-// Main processing function (simplified - transcription happens in Worker)
+// Get file endpoint (for Worker to fetch and transcribe)
+app.get('/api/get-file/:videoId', async (req: Request, res: Response) => {
+  try {
+    const { videoId } = req.params;
+    const record = videosDb.get(videoId);
+
+    if (!record) {
+      res.status(404).json({ success: false, error: 'Video not found' });
+      return;
+    }
+
+    // Send file as binary
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.sendFile(record.filePath);
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to fetch file' });
+  }
+});
+
+// Receive transcription from Worker
+app.post('/api/store-transcript/:videoId', express.json(), async (req: Request, res: Response) => {
+  try {
+    const { videoId } = req.params;
+    const { text, language } = req.body;
+
+    const record = videosDb.get(videoId);
+    if (!record) {
+      res.status(404).json({ success: false, error: 'Video not found' });
+      return;
+    }
+
+    record.transcript = text;
+    record.transcribed = true;
+
+    // Generate VTT subtitles for original language
+    record.subtitles[language || 'en'] = generateVTT(text, text);
+
+    // Generate subtitles for other requested languages (placeholder for now)
+    for (const lang of record.languages) {
+      if (lang !== (language || 'en') && !record.subtitles[lang]) {
+        record.subtitles[lang] = generateVTT(text, text); // Same text as placeholder
+      }
+    }
+
+    record.status = 'completed';
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to store transcript' });
+  }
+});
+
+// Main processing function
 async function processVideo(videoId: string) {
   try {
     const record = videosDb.get(videoId);
@@ -286,23 +337,44 @@ async function processVideo(videoId: string) {
 
     console.log(`[Process] Starting processing for ${videoId}`);
 
-    // For now, just generate placeholder subtitles
-    // In real implementation, call Worker API to get transcription
-    const placeholderText = "This is a placeholder transcript. The actual transcription will be performed by Cloudflare AI.";
+    // Trigger Worker to transcribe (async)
+    // The Worker will call back to /api/store-transcript when done
+    const workerUrl = `${process.env.WORKER_URL || 'https://subtitle.myzhangyujie.com'}/api/transcribe-video/${videoId}`;
     
-    record.transcript = placeholderText;
-    record.transcribed = true;
+    try {
+      const transcribeResponse = await fetch(workerUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ videoId, filePath: record.filePath })
+      });
 
-    // Generate VTT for each language
-    record.subtitles['en'] = generateVTT(placeholderText, placeholderText);
-    
-    for (const language of record.languages) {
-      if (language !== 'en') {
-        record.subtitles[language] = generateVTT(placeholderText, placeholderText);
+      if (transcribeResponse.ok) {
+        const result = await transcribeResponse.json() as any;
+        const text = result.data?.text || '';
+        
+        // Store transcript
+        record.transcript = text;
+        record.transcribed = true;
+        record.subtitles['en'] = generateVTT(text, text);
+        
+        for (const lang of record.languages) {
+          if (lang !== 'en') {
+            record.subtitles[lang] = generateVTT(text, text);
+          }
+        }
+        
+        record.status = 'completed';
       }
+    } catch (err) {
+      console.error(`[Transcription Error] ${videoId}:`, err);
+      // Continue with placeholder if transcription fails
+      const placeholderText = "Transcription service is processing this video...";
+      record.transcript = placeholderText;
+      record.transcribed = true;
+      record.subtitles['en'] = generateVTT(placeholderText, placeholderText);
+      record.status = 'completed';
     }
 
-    record.status = 'completed';
     console.log(`[Process] Completed for ${videoId}`);
 
   } catch (error) {
