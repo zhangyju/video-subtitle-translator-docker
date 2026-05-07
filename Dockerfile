@@ -13,8 +13,6 @@ RUN npm ci
 
 # Copy source code and assets
 COPY src ./src
-COPY db ./db
-COPY public ./public
 COPY tsconfig.json .
 
 # Compile TypeScript
