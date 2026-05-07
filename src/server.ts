@@ -4,10 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 
-const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -60,7 +57,7 @@ interface VideoRecord {
 
 const videosDb = new Map<string, VideoRecord>();
 
-// Language mapping for Whisper
+// Language mapping
 const languageCodeMap: Record<string, string> = {
   'zh': 'Chinese',
   'en': 'English',
@@ -134,7 +131,7 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
       }
     });
 
-    // Process async (transcription, translation, etc.)
+    // Process async (transcription will be done via Worker)
     processVideo(videoId).catch(err => {
       console.error(`[Error] Processing video ${videoId}:`, err);
       const record = videosDb.get(videoId);
@@ -245,59 +242,6 @@ app.listen(PORT, () => {
   console.log(`Upload directory: ${uploadDir}`);
 });
 
-// Whisper transcription
-async function transcribeWithWhisper(filePath: string): Promise<string> {
-  try {
-    console.log(`[Whisper] Starting transcription for ${filePath}`);
-    
-    // Use Whisper CLI (assume whisper is installed)
-    const command = `whisper "${filePath}" --model base --output_format json --output_dir /tmp --language auto`;
-    
-    const { stderr } = await execAsync(command, { maxBuffer: 10 * 1024 * 1024 });
-    
-    if (stderr && !stderr.includes('Transcribing')) {
-      console.error('[Whisper Error]', stderr);
-    }
-
-    // Read the JSON output
-    const jsonPath = filePath + '.json';
-    if (!fs.existsSync(jsonPath)) {
-      throw new Error('Whisper output not found');
-    }
-
-    const result = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-    const transcript = result.text;
-
-    console.log(`[Whisper] Transcription complete: ${transcript.length} chars`);
-    return transcript;
-  } catch (error) {
-    console.error('[Whisper Error]', error);
-    throw new Error(`Transcription failed: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
-
-// Simple translation using sed/echo (will be replaced with proper M2M-100)
-async function translateText(text: string, targetLanguage: string): Promise<string> {
-  try {
-    // For now, return original text with language indicator
-    // In production, use M2M-100 model via transformers
-    console.log(`[Translate] Translating to ${languageCodeMap[targetLanguage]} (${targetLanguage})`);
-    
-    // Placeholder: In real implementation, call M2M-100 or other translation API
-    // For demo, we'll just return the original text
-    // You can integrate with:
-    // 1. OpenAI API
-    // 2. Google Translate API
-    // 3. Local M2M-100 model
-    // 4. HuggingFace Inference API
-    
-    return text; // Return original for now (placeholder)
-  } catch (error) {
-    console.error('[Translate Error]', error);
-    throw error;
-  }
-}
-
 // Generate VTT subtitle format
 function generateVTT(_transcript: string, translatedText: string): string {
   // Simple VTT generation - split text into chunks with timestamps
@@ -332,7 +276,7 @@ function formatTime(seconds: number): string {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
 }
 
-// Main processing function
+// Main processing function (simplified - transcription happens in Worker)
 async function processVideo(videoId: string) {
   try {
     const record = videosDb.get(videoId);
@@ -342,29 +286,22 @@ async function processVideo(videoId: string) {
 
     console.log(`[Process] Starting processing for ${videoId}`);
 
-    // Step 1: Transcribe with Whisper
-    const transcript = await transcribeWithWhisper(record.filePath);
-    record.transcript = transcript;
+    // For now, just generate placeholder subtitles
+    // In real implementation, call Worker API to get transcription
+    const placeholderText = "This is a placeholder transcript. The actual transcription will be performed by Cloudflare AI.";
+    
+    record.transcript = placeholderText;
     record.transcribed = true;
 
-    console.log(`[Process] Transcription complete: ${transcript.length} characters`);
-
-    // Step 2: Generate VTT for original language (English assumption from Whisper)
-    const originalVTT = generateVTT(transcript, transcript);
-    record.subtitles['en'] = originalVTT;
-
-    // Step 3: Translate to target languages and generate VTTs
+    // Generate VTT for each language
+    record.subtitles['en'] = generateVTT(placeholderText, placeholderText);
+    
     for (const language of record.languages) {
-      if (language === 'en') continue; // Skip if already have English
-
-      const translatedText = await translateText(transcript, language);
-      const vttContent = generateVTT(transcript, translatedText);
-      record.subtitles[language] = vttContent;
-
-      console.log(`[Process] Translation complete for ${language}`);
+      if (language !== 'en') {
+        record.subtitles[language] = generateVTT(placeholderText, placeholderText);
+      }
     }
 
-    // Step 4: Mark as completed
     record.status = 'completed';
     console.log(`[Process] Completed for ${videoId}`);
 

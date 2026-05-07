@@ -1,5 +1,10 @@
 import { Container, getContainer } from "@cloudflare/containers";
 
+interface Env {
+  CONTAINER: any;
+  AI: any;
+}
+
 const HTML_CONTENT = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -480,7 +485,7 @@ export class VideoSubtitleContainer extends Container {
 }
 
 export default {
-  async fetch(request: Request, env: any, _ctx: any) {
+  async fetch(request: Request, env: Env, _ctx: any) {
     try {
       const url = new URL(request.url);
       
@@ -490,6 +495,11 @@ export default {
           status: 200,
           headers: { 'Content-Type': 'text/html; charset=utf-8' }
         });
+      }
+
+      // Handle transcription via Cloudflare AI
+      if (url.pathname === '/api/transcribe' && request.method === 'POST') {
+        return await handleTranscription(request, env);
       }
 
       // Forward all other requests to container
@@ -511,3 +521,45 @@ export default {
     }
   },
 };
+
+async function handleTranscription(request: Request, env: Env) {
+  try {
+    const formData = await request.formData();
+    const audioFile = formData.get('file') as File;
+
+    if (!audioFile) {
+      return new Response(JSON.stringify({ success: false, error: 'No audio file provided' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Convert file to ArrayBuffer
+    const arrayBuffer = await audioFile.arrayBuffer();
+
+    // Call Cloudflare AI Whisper
+    const response = await env.AI.run('@cf/openai/whisper', {
+      audio: Array.from(new Uint8Array(arrayBuffer)),
+    }) as any;
+
+    return new Response(JSON.stringify({
+      success: true,
+      data: {
+        text: response.result?.text || '',
+        language: response.result?.language || 'en'
+      }
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    console.error('[Transcription Error]', error);
+    return new Response(JSON.stringify({
+      success: false,
+      error: error instanceof Error ? error.message : 'Transcription failed'
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}

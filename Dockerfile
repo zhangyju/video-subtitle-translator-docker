@@ -2,15 +2,8 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install system dependencies for Whisper (Python + FFmpeg)
-RUN apk add --no-cache \
-  python3 \
-  py3-pip \
-  ffmpeg \
-  curl
-
-# Install Whisper via pip
-RUN pip install --no-cache-dir openai-whisper
+# Install system dependencies for FFmpeg (audio conversion)
+RUN apk add --no-cache ffmpeg curl
 
 # Copy package files
 COPY package*.json ./
