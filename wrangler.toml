@@ -1,0 +1,66 @@
+name = "video-subtitle-translator"
+main = "src/container-worker.ts"
+compatibility_date = "2024-12-16"
+compatibility_flags = ["nodejs_compat"]
+
+# Cloudflare Containers configuration (for Paid plan)
+[[containers]]
+class_name = "VideoSubtitleContainer"
+image = "./Dockerfile"
+instance_type = "standard-2"  # 1 vCPU, 6GB memory, 12GB disk - sufficient for video processing
+max_instances = 2
+
+# Durable Objects binding for container
+[[durable_objects.bindings]]
+class_name = "VideoSubtitleContainer"
+name = "CONTAINER"
+
+# Migrations for Durable Objects
+[[migrations]]
+new_sqlite_classes = ["VideoSubtitleContainer"]
+tag = "v1"
+
+# Workers AI binding (for traditional Workers operations)
+[ai]
+binding = "AI"
+
+# R2 bucket binding
+[[r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "video-subtitle-bucket"
+preview_bucket_name = "video-subtitle-bucket-preview"
+
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "video-subtitle-db"
+database_id = "324af083-cdab-450a-9967-db8045c67cb6"
+
+# Environment variables
+[env.production]
+vars = { ENVIRONMENT = "production" }
+
+[env.development]
+vars = { ENVIRONMENT = "development" }
+
+# Routes configuration for custom domain
+[[routes]]
+pattern = "subtitle.myzhangyujie.com/*"
+zone_name = "myzhangyujie.com"
+
+# Also route www subdomain
+[[routes]]
+pattern = "www.subtitle.myzhangyujie.com/*"
+zone_name = "myzhangyujie.com"
+
+# CORS settings for production
+[env.production.cors]
+allow_credentials = true
+allow_headers = ["Content-Type", "Authorization", "Accept", "X-Requested-With"]
+allow_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"]
+allow_origins = ["*"]
+max_age = 86400
+
+[build]
+command = "npm run build"
+cwd = "./"

@@ -1,0 +1,14 @@
+node_modules
+npm-debug.log
+.git
+.gitignore
+.DS_Store
+dist
+.wrangler
+.env
+.env.local
+frontend
+public
+*.md
+.github
+.vscode
