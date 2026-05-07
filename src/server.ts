@@ -216,6 +216,31 @@ app.get('/api/subtitles/:videoId/:language', async (req: Request, res: Response)
   }
 });
 
+// Get file for Worker transcription
+app.get('/api/get-file/:videoId', async (req: Request, res: Response) => {
+  try {
+    const record = videosDb.get(req.params.videoId);
+
+    if (!record) {
+      res.status(404).json({ success: false, error: 'Video not found' });
+      return;
+    }
+
+    if (!fs.existsSync(record.filePath)) {
+      res.status(404).json({ success: false, error: 'File not found' });
+      return;
+    }
+
+    console.log(`[Server] Sending file for ${req.params.videoId}`);
+
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.sendFile(record.filePath);
+  } catch (error) {
+    console.error('[Error] Get file:', error);
+    res.status(500).json({ success: false, error: 'Failed to get file' });
+  }
+});
+
 // Store transcription result from Worker
 app.post('/api/store-transcript/:videoId', express.json(), async (req: Request, res: Response) => {
   try {

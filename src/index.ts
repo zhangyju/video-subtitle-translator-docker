@@ -611,8 +611,7 @@ async function handleTranscription(request: Request, env: Env) {
 
 async function triggerTranscription(request: Request, env: Env) {
   try {
-    // This would be called by container to trigger async transcription via Worker
-    const { videoId, filePath } = await request.json() as any;
+    const { videoId, filePath, languages, title } = await request.json() as any;
 
     if (!videoId || !filePath) {
       return new Response(JSON.stringify({ success: false, error: 'Missing parameters' }), {
@@ -620,6 +619,8 @@ async function triggerTranscription(request: Request, env: Env) {
         headers: { 'Content-Type': 'application/json' }
       });
     }
+
+    console.log(`[Worker] Transcribing video ${videoId}: ${title}`);
 
     // Read file from container storage
     const fileContent = await fetch(`http://localhost:3000/api/get-file/${videoId}`, {
@@ -631,25 +632,76 @@ async function triggerTranscription(request: Request, env: Env) {
     }
 
     const arrayBuffer = await fileContent.arrayBuffer();
+    const audioArray = Array.from(new Uint8Array(arrayBuffer));
 
-    // Call Cloudflare AI Whisper
-    const response = await env.AI.run('@cf/openai/whisper', {
-      audio: Array.from(new Uint8Array(arrayBuffer)),
+    // Step 1: Transcribe with Cloudflare AI Whisper
+    console.log(`[Worker] Running Whisper transcription`);
+    const whisperResponse = await env.AI.run('@cf/openai/whisper', {
+      audio: audioArray,
     }) as any;
 
-    // Return results to container
+    const transcript = whisperResponse.result?.text || '';
+    const detectedLanguage = whisperResponse.result?.language || 'en';
+
+    console.log(`[Worker] Transcription complete: ${transcript.length} chars, detected language: ${detectedLanguage}`);
+
+    // Step 2: Generate VTT for original language
+    const subtitles: Record<string, string> = {};
+    subtitles[detectedLanguage] = generateVTT(transcript);
+
+    // Step 3: Translate to other languages
+    console.log(`[Worker] Translating to ${languages.length} languages`);
+    for (const lang of languages) {
+      if (lang !== detectedLanguage) {
+        try {
+          const translationResponse = await env.AI.run('@cf/meta/m2m100-1.2b', {
+            text: transcript,
+            source_lang: detectedLanguageToM2M(detectedLanguage),
+            target_lang: languageCodeToM2M(lang)
+          }) as any;
+
+          const translatedText = translationResponse.result?.translated_text || transcript;
+          subtitles[lang] = generateVTT(translatedText);
+          console.log(`[Worker] Translated to ${lang}`);
+        } catch (err) {
+          console.error(`[Worker] Translation error for ${lang}:`, err);
+          // Fallback: use original transcript
+          subtitles[lang] = generateVTT(transcript);
+        }
+      }
+    }
+
+    // Step 4: Send back to Container to store
+    console.log(`[Worker] Sending results to Container`);
+    const storeResponse = await fetch('http://localhost:3000/api/store-transcript/' + videoId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        transcript,
+        subtitles
+      })
+    });
+
+    if (!storeResponse.ok) {
+      console.error('[Worker] Failed to store transcript');
+      throw new Error('Failed to store transcript in container');
+    }
+
     return new Response(JSON.stringify({
       success: true,
       data: {
-        text: response.result?.text || '',
-        language: response.result?.language || 'en'
+        videoId,
+        title,
+        transcript,
+        subtitles
       }
     }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' }
     });
+
   } catch (error) {
-    console.error('[Async Transcription Error]', error);
+    console.error('[Worker Transcription Error]', error);
     return new Response(JSON.stringify({
       success: false,
       error: error instanceof Error ? error.message : 'Transcription failed'
@@ -658,4 +710,68 @@ async function triggerTranscription(request: Request, env: Env) {
       headers: { 'Content-Type': 'application/json' }
     });
   }
+}
+
+// Helper functions
+function generateVTT(text: string): string {
+  const lines = text.split(/[\n.!?]+/).filter(l => l.trim());
+  
+  let vtt = 'WEBVTT\n\n';
+  let currentTime = 0;
+  const wordsPerSecond = 2.5;
+
+  lines.forEach((line) => {
+    if (!line.trim()) return;
+    
+    const words = line.trim().split(/\s+/).length;
+    const duration = Math.max(words / wordsPerSecond, 1);
+    
+    const startTime = formatTime(currentTime);
+    const endTime = formatTime(currentTime + duration);
+    
+    vtt += `${startTime} --> ${endTime}\n`;
+    vtt += `${line.trim()}\n\n`;
+    
+    currentTime += duration;
+  });
+
+  return vtt;
+}
+
+function formatTime(seconds: number): string {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 1000);
+  
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+}
+
+function languageCodeToM2M(code: string): string {
+  const mapping: Record<string, string> = {
+    'zh': 'zho',
+    'en': 'eng',
+    'es': 'spa',
+    'fr': 'fra',
+    'de': 'deu',
+    'ja': 'jpn',
+    'ko': 'kor',
+    'pt': 'por'
+  };
+  return mapping[code] || 'eng';
+}
+
+function detectedLanguageToM2M(lang: string): string {
+  // Whisper returns language names like 'English', 'Chinese', etc.
+  const mapping: Record<string, string> = {
+    'english': 'eng',
+    'chinese': 'zho',
+    'spanish': 'spa',
+    'french': 'fra',
+    'german': 'deu',
+    'japanese': 'jpn',
+    'korean': 'kor',
+    'portuguese': 'por'
+  };
+  return mapping[lang.toLowerCase()] || 'eng';
 }
