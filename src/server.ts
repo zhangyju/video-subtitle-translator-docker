@@ -251,10 +251,9 @@ async function transcribeWithWhisper(filePath: string): Promise<string> {
     console.log(`[Whisper] Starting transcription for ${filePath}`);
     
     // Use Whisper CLI (assume whisper is installed)
-    const outputPath = filePath + '.json';
     const command = `whisper "${filePath}" --model base --output_format json --output_dir /tmp --language auto`;
     
-    const { stdout, stderr } = await execAsync(command, { maxBuffer: 10 * 1024 * 1024 });
+    const { stderr } = await execAsync(command, { maxBuffer: 10 * 1024 * 1024 });
     
     if (stderr && !stderr.includes('Transcribing')) {
       console.error('[Whisper Error]', stderr);
@@ -300,7 +299,7 @@ async function translateText(text: string, targetLanguage: string): Promise<stri
 }
 
 // Generate VTT subtitle format
-function generateVTT(transcript: string, translatedText: string): string {
+function generateVTT(_transcript: string, translatedText: string): string {
   // Simple VTT generation - split text into chunks with timestamps
   const lines = translatedText.split(/[\n.!?]+/).filter(l => l.trim());
   
@@ -308,7 +307,7 @@ function generateVTT(transcript: string, translatedText: string): string {
   let currentTime = 0;
   const wordsPerSecond = 2.5; // Average reading speed
 
-  lines.forEach((line, index) => {
+  lines.forEach((line) => {
     const words = line.trim().split(/\s+/).length;
     const duration = words / wordsPerSecond;
     
