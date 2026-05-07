@@ -3,13 +3,17 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, '../public')));
 
 // Upload handling
 const uploadDir = process.env.UPLOAD_DIR || '/tmp/uploads';
@@ -35,7 +39,11 @@ const upload = multer({
 
 // Routes
 app.get('/', (_req: Request, res: Response) => {
-  res.sendFile(path.join(__dirname, '../public/index.html'));
+  res.sendFile(path.join(__dirname, '../public/index.html'), (err) => {
+    if (err) {
+      res.status(404).json({ success: false, error: 'Index page not found' });
+    }
+  });
 });
 
 app.get('/api/health', (_req: Request, res: Response) => {
