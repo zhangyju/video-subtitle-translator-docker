@@ -2,12 +2,17 @@ import express, { Request, Response } from 'express';
 import multer from 'multer';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
+import { createClient } from '@libsql/client';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb' }));
+
+// D1 Database connection
+const dbUrl = process.env.DB_URL || 'file:./.wrangler/state/v3/d1/video-subtitle-db.sqlite';
+const db = createClient({ url: dbUrl });
 
 const uploadDir = '/tmp/uploads';
 if (!fs.existsSync(uploadDir)) {
@@ -69,9 +74,40 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
     }
 
     const videoId = uuidv4();
+    const userId = req.headers['x-user-id'] as string || 'anonymous';
     const title = req.body.title || req.file.originalname;
     const languages = req.body.languages ? JSON.parse(req.body.languages) : ['en'];
 
+    // Check user quota (if authenticated)
+    if (userId !== 'anonymous') {
+      const user = await db.execute({
+        sql: 'SELECT storage_used_gb, quota_storage_gb FROM users WHERE id = ?',
+        args: [userId]
+      });
+      
+      if (user.rows.length === 0) {
+        res.status(401).json({ success: false, error: 'User not found' });
+        return;
+      }
+
+      const userRecord = user.rows[0] as any;
+      const fileSizeGb = req.file.size / (1024 * 1024 * 1024);
+      
+      if (userRecord.storage_used_gb + fileSizeGb > userRecord.quota_storage_gb) {
+        res.status(400).json({ success: false, error: 'Storage quota exceeded' });
+        return;
+      }
+    }
+
+    // Save to D1
+    const createdAt = new Date().toISOString();
+    await db.execute({
+      sql: `INSERT INTO videos (id, user_id, title, original_filename, file_size, status, created_at, languages)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [videoId, userId, title, req.file.originalname, req.file.size, 'processing', createdAt, JSON.stringify(languages)]
+    });
+
+    // Store locally for processing
     const videoRecord: VideoRecord = {
       id: videoId,
       title,
@@ -79,7 +115,7 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
       fileSize: req.file.size,
       filePath: req.file.path,
       status: 'processing',
-      createdAt: new Date().toISOString(),
+      createdAt,
       transcribed: false,
       subtitles: {},
       languages
@@ -87,7 +123,7 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
 
     videosDb.set(videoId, videoRecord);
 
-    console.log(`[Upload] Video: ${videoId}, Title: ${title}, File: ${req.file.filename}`);
+    console.log(`[Upload] Video: ${videoId}, User: ${userId}, Title: ${title}, File: ${req.file.filename}`);
 
     res.status(201).json({
       success: true,
@@ -97,19 +133,24 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
         originalFileName: req.file.originalname,
         fileSize: req.file.size,
         status: 'processing',
-        createdAt: new Date().toISOString(),
+        createdAt,
         languages
       }
     });
 
     // Start async processing
-    processVideo(videoId).catch(err => {
+    processVideo(videoId, userId).catch(err => {
       console.error(`[Error] Processing video ${videoId}:`, err);
       const record = videosDb.get(videoId);
       if (record) {
         record.status = 'failed';
         record.error = err instanceof Error ? err.message : String(err);
       }
+      // Update D1
+      db.execute({
+        sql: 'UPDATE videos SET status = ? WHERE id = ?',
+        args: ['failed', videoId]
+      }).catch(e => console.error('[DB Error]', e));
     });
 
   } catch (error) {
@@ -121,23 +162,31 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
   }
 });
 
-// Get all videos
-app.get('/api/videos', async (_req: Request, res: Response) => {
+// Get all videos (for authenticated user)
+app.get('/api/videos', async (req: Request, res: Response) => {
   try {
-    const videos = Array.from(videosDb.values()).map(v => ({
+    const userId = req.headers['x-user-id'] as string || 'anonymous';
+    
+    const result = await db.execute({
+      sql: 'SELECT * FROM videos WHERE user_id = ? ORDER BY created_at DESC',
+      args: [userId]
+    });
+
+    const videos = result.rows.map((v: any) => ({
       id: v.id,
       title: v.title,
       status: v.status,
-      createdAt: v.createdAt,
-      originalFileName: v.originalFileName,
-      fileSize: v.fileSize,
-      transcribed: v.transcribed,
-      subtitles: Object.keys(v.subtitles), // Return language codes
-      languages: v.languages
+      createdAt: v.created_at,
+      originalFileName: v.original_filename,
+      fileSize: v.file_size,
+      r2Url: v.r2_url,
+      languages: v.languages ? JSON.parse(v.languages) : [],
+      transcribed: v.status === 'completed'
     }));
 
     res.json({ success: true, data: { videos } });
   } catch (error) {
+    console.error('[Get Videos Error]', error);
     res.status(500).json({ success: false, error: 'Failed to fetch videos' });
   }
 });
@@ -187,6 +236,7 @@ app.get('/api/watch/:videoId', async (req: Request, res: Response) => {
         title: record.title,
         originalFileName: record.originalFileName,
         status: record.status,
+        createdAt: record.createdAt,
         availableSubtitles: Object.keys(record.subtitles),
         subtitle: subtitle || null,
         currentLanguage: lang
@@ -282,7 +332,7 @@ app.listen(PORT, () => {
 });
 
 // Main processing function
-async function processVideo(videoId: string) {
+async function processVideo(videoId: string, userId: string) {
   try {
     const record = videosDb.get(videoId);
     if (!record) {
@@ -296,7 +346,10 @@ async function processVideo(videoId: string) {
     
     const transcribeResponse = await fetch(workerUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'x-user-id': userId
+      },
       body: JSON.stringify({
         videoId,
         filePath: record.filePath,
@@ -316,6 +369,12 @@ async function processVideo(videoId: string) {
       record.transcribed = true;
       record.subtitles = result.data?.subtitles || {};
       record.status = 'completed';
+      
+      // Update D1 with completed status and R2 URL
+      await db.execute({
+        sql: 'UPDATE videos SET status = ?, r2_url = ? WHERE id = ?',
+        args: ['completed', result.data?.r2Url || '', videoId]
+      });
       
       console.log(`[Process] Completed for ${videoId}: ${Object.keys(record.subtitles).length} subtitles generated`);
     } else {

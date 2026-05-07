@@ -30,10 +30,10 @@ zone_name = "myzhangyujie.com"
 
 # Environment configuration
 [env.production]
-vars = { ENVIRONMENT = "production" }
+vars = { ENVIRONMENT = "production", EMAIL_FROM = "noreply@subtitle.myzhangyujie.com" }
 
 [env.development]
-vars = { ENVIRONMENT = "development" }
+vars = { ENVIRONMENT = "development", EMAIL_FROM = "dev@subtitle.myzhangyujie.com" }
 
 [build]
 command = "npm run build"
