@@ -16,6 +16,28 @@ export class VideoSubtitleContainer extends Container {
 export default {
   async fetch(request: Request, env: any, _ctx: any) {
     try {
+      // Handle root path
+      const url = new URL(request.url);
+      if (url.pathname === '/') {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            message: 'Video Subtitle Translator - Cloudflare Containers',
+            version: 'v1.0.3',
+            endpoints: {
+              upload: 'POST /api/upload (multipart/form-data)',
+              videos: 'GET /api/videos',
+              health: 'GET /api/health',
+              progress: 'GET /api/progress/:videoId'
+            }
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          }
+        );
+      }
+
       // Get or create a container instance
       // Using "default" session ID means all requests go to the same container
       const container = getContainer(env.CONTAINER, "default");
