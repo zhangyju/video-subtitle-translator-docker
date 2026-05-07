@@ -5,22 +5,29 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Install all dependencies (including dev for TypeScript compilation)
+RUN npm ci
 
 # Copy source code
 COPY src ./src
 COPY db ./db
+COPY tsconfig.json .
 
-# Build if needed
-RUN npm run build 2>/dev/null || true
+# Compile TypeScript
+RUN npm run build
+
+# Remove dev dependencies for smaller image
+RUN npm prune --omit=dev
+
+# Create upload directory
+RUN mkdir -p /data/uploads
 
 # Expose port
 EXPOSE 3000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3000/api/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"
+  CMD node -e "require('http').get('http://localhost:3000/api/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})" || exit 1
 
 # Start the server
-CMD ["npm", "start"]
+CMD ["node", "dist/server.js"]
