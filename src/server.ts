@@ -18,7 +18,6 @@ app.use(express.static(path.join(__dirname, '../public')));
 // Upload handling
 const uploadDir = process.env.UPLOAD_DIR || '/data/uploads';
 const subtitlesDir = path.join(uploadDir, 'subtitles');
-const dbFile = '/data/videos.json';
 
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
@@ -27,28 +26,8 @@ if (!fs.existsSync(subtitlesDir)) {
   fs.mkdirSync(subtitlesDir, { recursive: true });
 }
 
-// Load database from file
-function loadDatabase(): Map<string, VideoRecord> {
-  try {
-    if (fs.existsSync(dbFile)) {
-      const data = JSON.parse(fs.readFileSync(dbFile, 'utf-8'));
-      return new Map(data);
-    }
-  } catch (error) {
-    console.error('[Database] Failed to load:', error);
-  }
-  return new Map();
-}
-
-// Save database to file
-function saveDatabase(db: Map<string, VideoRecord>) {
-  try {
-    const data = Array.from(db.entries());
-    fs.writeFileSync(dbFile, JSON.stringify(data), 'utf-8');
-  } catch (error) {
-    console.error('[Database] Failed to save:', error);
-  }
-}
+// In-memory database (note: will be reset on container restart)
+// For production, use Cloudflare D1 or similar persistent storage
 
 const storage = multer.diskStorage({
   destination: uploadDir,
@@ -80,7 +59,7 @@ interface VideoRecord {
   error?: string;
 }
 
-const videosDb = loadDatabase();
+const videosDb = new Map<string, VideoRecord>();
 
 // Language mapping
 const languageCodeMap: Record<string, string> = {
@@ -141,7 +120,6 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
     };
 
     videosDb.set(videoId, videoRecord);
-    saveDatabase(videosDb);
 
     // Return success
     res.status(201).json({
@@ -347,7 +325,6 @@ app.post('/api/store-transcript/:videoId', express.json(), async (req: Request, 
     }
 
     record.status = 'completed';
-    saveDatabase(videosDb);
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to store transcript' });
@@ -391,7 +368,6 @@ async function processVideo(videoId: string) {
         }
         
         record.status = 'completed';
-        saveDatabase(videosDb);
       }
     } catch (err) {
       console.error(`[Transcription Error] ${videoId}:`, err);
@@ -401,7 +377,6 @@ async function processVideo(videoId: string) {
       record.transcribed = true;
       record.subtitles['en'] = generateVTT(placeholderText, placeholderText);
       record.status = 'completed';
-      saveDatabase(videosDb);
     }
 
     console.log(`[Process] Completed for ${videoId}`);
@@ -412,7 +387,6 @@ async function processVideo(videoId: string) {
     if (record) {
       record.status = 'failed';
       record.error = error instanceof Error ? error.message : String(error);
-      saveDatabase(videosDb);
     }
   }
 }
