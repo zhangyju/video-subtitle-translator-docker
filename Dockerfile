@@ -8,9 +8,10 @@ COPY package*.json ./
 # Install all dependencies (including dev for TypeScript compilation)
 RUN npm ci
 
-# Copy source code
+# Copy source code and assets
 COPY src ./src
 COPY db ./db
+COPY public ./public
 COPY tsconfig.json .
 
 # Compile TypeScript
