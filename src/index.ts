@@ -3,6 +3,7 @@ import { Container, getContainer } from "@cloudflare/containers";
 interface Env {
   CONTAINER: any;
   AI: any;
+  DB: any;
 }
 
 const HTML_CONTENT = `<!DOCTYPE html>
@@ -524,6 +525,228 @@ export class VideoSubtitleContainer extends Container {
   sleepAfter = "30m";
 }
 
+// 认证路由处理
+async function handleAuth(request: Request, env: Env) {
+  const url = new URL(request.url);
+  const path = url.pathname;
+
+  // 注册
+  if (path === '/api/auth/register' && request.method === 'POST') {
+    return await handleRegister(request, env);
+  }
+
+  // 登录
+  if (path === '/api/auth/login' && request.method === 'POST') {
+    return await handleLogin(request, env);
+  }
+
+  // 验证 email
+  if (path === '/api/auth/verify' && request.method === 'POST') {
+    return await handleVerifyEmail(request, env);
+  }
+
+  return new Response(JSON.stringify({ success: false, error: 'Not found' }), {
+    status: 404,
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+async function handleRegister(request: Request, env: Env) {
+  try {
+    const { email, password, fullName } = await request.json() as any;
+
+    if (!email || !password || !fullName) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'Missing required fields' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // 检查邮箱是否已存在
+    const existingUser = await env.DB.prepare('SELECT id FROM users WHERE email = ?')
+      .bind(email)
+      .first();
+
+    if (existingUser) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'Email already registered' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // 密码加密（简单实现，生产环境使用 bcrypt）
+    const passwordHash = await hashPassword(password);
+    const userId = crypto.randomUUID();
+    const verificationToken = crypto.randomUUID();
+
+    // 创建用户
+    await env.DB.prepare(
+      `INSERT INTO users (id, email, password_hash, full_name, verification_token) 
+       VALUES (?, ?, ?, ?, ?)`
+    ).bind(userId, email, passwordHash, fullName, verificationToken).run();
+
+    console.log(`[Auth] User registered: ${email}`);
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        data: {
+          id: userId,
+          email,
+          message: 'Registration successful. Please verify your email.'
+        }
+      }),
+      { status: 201, headers: { 'Content-Type': 'application/json' } }
+    );
+
+  } catch (error) {
+    console.error('[Register Error]', error);
+    return new Response(
+      JSON.stringify({ success: false, error: 'Registration failed' }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+}
+
+async function handleLogin(request: Request, env: Env) {
+  try {
+    const { email, password } = await request.json() as any;
+
+    if (!email || !password) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'Missing email or password' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // 查询用户
+    const user = await env.DB.prepare('SELECT * FROM users WHERE email = ?')
+      .bind(email)
+      .first() as any;
+
+    if (!user) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'Invalid email or password' }),
+        { status: 401, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // 验证密码
+    const passwordValid = await verifyPassword(password, user.password_hash);
+
+    if (!passwordValid) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'Invalid email or password' }),
+        { status: 401, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // 生成 token
+    const token = generateAuthToken(user.id);
+
+    console.log(`[Auth] User logged in: ${email}`);
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        data: {
+          id: user.id,
+          email: user.email,
+          fullName: user.full_name,
+          verified: user.verified,
+          token,
+          quota: {
+            storage: user.quota_storage_gb,
+            transcriptions: user.quota_transcriptions,
+            dailyProcessing: user.quota_daily_processing_gb
+          }
+        }
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+
+  } catch (error) {
+    console.error('[Login Error]', error);
+    return new Response(
+      JSON.stringify({ success: false, error: 'Login failed' }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+}
+
+async function handleVerifyEmail(request: Request, env: Env) {
+  try {
+    const { userId, token } = await request.json() as any;
+
+    if (!userId || !token) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'Missing parameters' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // 验证 token
+    const user = await env.DB.prepare('SELECT * FROM users WHERE id = ? AND verification_token = ?')
+      .bind(userId, token)
+      .first() as any;
+
+    if (!user) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'Invalid token' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // 标记为已验证
+    await env.DB.prepare('UPDATE users SET verified = 1, verification_token = NULL WHERE id = ?')
+      .bind(userId)
+      .run();
+
+    console.log(`[Auth] Email verified: ${user.email}`);
+
+    return new Response(
+      JSON.stringify({ success: true, message: 'Email verified successfully' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+
+  } catch (error) {
+    console.error('[Verify Error]', error);
+    return new Response(
+      JSON.stringify({ success: false, error: 'Verification failed' }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+}
+
+// Helper functions
+async function hashPassword(password: string): Promise<string> {
+  // 简化实现，生产环境使用 bcrypt
+  const encoder = new TextEncoder();
+  const data = encoder.encode(password + Math.random().toString());
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function verifyPassword(password: string, hash: string): Promise<boolean> {
+  // 简化实现
+  const encoder = new TextEncoder();
+  const data = encoder.encode(password);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashStr = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+  return hash.includes(hashStr);
+}
+
+function generateAuthToken(userId: string): string {
+  const payload = {
+    userId,
+    iat: Date.now(),
+    exp: Date.now() + 24 * 60 * 60 * 1000 // 24 hours
+  };
+  return Buffer.from(JSON.stringify(payload)).toString('base64');
+}
+
+
+
 export default {
   async fetch(request: Request, env: Env, _ctx: any) {
     try {
@@ -535,6 +758,11 @@ export default {
           status: 200,
           headers: { 'Content-Type': 'text/html; charset=utf-8' }
         });
+      }
+
+      // Handle authentication routes
+      if (url.pathname.startsWith('/api/auth/')) {
+        return await handleAuth(request, env);
       }
 
       // Handle transcription via Cloudflare AI
