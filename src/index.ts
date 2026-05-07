@@ -234,31 +234,31 @@ const HTML_CONTENT = `<!DOCTYPE html>
             </div>
 
             <div class="form-group">
-                <label>翻译语言</label>
+                <label>Translation Languages</label>
                 <div class="languages">
                     <label class="lang-checkbox">
-                        <input type="checkbox" value="zh" checked> 中文
+                        <input type="checkbox" value="zh" checked> Chinese
                     </label>
                     <label class="lang-checkbox">
-                        <input type="checkbox" value="en"> 英文
+                        <input type="checkbox" value="en"> English
                     </label>
                     <label class="lang-checkbox">
-                        <input type="checkbox" value="es"> 西班牙文
+                        <input type="checkbox" value="es"> Spanish
                     </label>
                     <label class="lang-checkbox">
-                        <input type="checkbox" value="fr"> 法文
+                        <input type="checkbox" value="fr"> French
                     </label>
                     <label class="lang-checkbox">
-                        <input type="checkbox" value="de"> 德文
+                        <input type="checkbox" value="de"> German
                     </label>
                     <label class="lang-checkbox">
-                        <input type="checkbox" value="ja"> 日文
+                        <input type="checkbox" value="ja"> Japanese
                     </label>
                     <label class="lang-checkbox">
-                        <input type="checkbox" value="ko"> 韩文
+                        <input type="checkbox" value="ko"> Korean
                     </label>
                     <label class="lang-checkbox">
-                        <input type="checkbox" value="pt"> 葡萄牙文
+                        <input type="checkbox" value="pt"> Portuguese
                     </label>
                 </div>
             </div>
@@ -426,24 +426,45 @@ const HTML_CONTENT = `<!DOCTYPE html>
                 if (data.data && data.data.videos && data.data.videos.length > 0) {
                     let html = '';
                     data.data.videos.forEach(video => {
+                        let subtitleButtons = '';
+                        if (video.subtitles && Object.keys(video.subtitles).length > 0) {
+                            subtitleButtons = '<div style="margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px;">';
+                            for (const [lang, subtitle] of Object.entries(video.subtitles)) {
+                                const langNames = {
+                                    'zh': 'Chinese',
+                                    'en': 'English',
+                                    'es': 'Spanish',
+                                    'fr': 'French',
+                                    'de': 'German',
+                                    'ja': 'Japanese',
+                                    'ko': 'Korean',
+                                    'pt': 'Portuguese'
+                                };
+                                subtitleButtons += \`<a href="/api/subtitles/\${video.id}/\${lang}" style="padding: 6px 12px; background: #667eea; color: white; border-radius: 4px; text-decoration: none; font-size: 12px; font-weight: 600;" download>⬇️ \${langNames[lang] || lang}</a>\`;
+                            }
+                            subtitleButtons += '</div>';
+                        }
+                        
                         html += \`
                             <div class="video-card">
-                                <div class="video-title">\${video.title || '无标题'}</div>
+                                <div class="video-title">\${video.title || 'Untitled'}</div>
                                 <div class="video-info">
-                                    <div>状态: \${video.status}</div>
-                                    <div>上传时间: \${new Date(video.createdAt).toLocaleDateString()}</div>
+                                    <div>Status: \${video.status}</div>
+                                    <div>Uploaded: \${new Date(video.createdAt).toLocaleDateString()}</div>
+                                    \${video.transcribed ? '<div>✅ Transcribed</div>' : '<div>⏳ Transcribing...</div>'}
                                 </div>
+                                \${subtitleButtons}
                             </div>
                         \`;
                     });
                     document.getElementById('videosList').innerHTML = html;
                 } else {
                     document.getElementById('videosList').innerHTML = 
-                        '<div class="empty">暂无视频，上传一个试试吧！</div>';
+                        '<div class="empty">No videos yet. Upload one to get started!</div>';
                 }
             } catch (error) {
                 document.getElementById('videosList').innerHTML = 
-                    \`<div class="empty">❌ 加载失败: \${error.message}</div>\`;
+                    \`<div class="empty">❌ Failed to load: \${error.message}</div>\`;
             }
         }
 

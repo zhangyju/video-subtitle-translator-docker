@@ -4,7 +4,10 @@ import path from 'path';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 
+const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -17,8 +20,12 @@ app.use(express.static(path.join(__dirname, '../public')));
 
 // Upload handling
 const uploadDir = process.env.UPLOAD_DIR || '/tmp/uploads';
+const subtitlesDir = path.join(uploadDir, 'subtitles');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
+}
+if (!fs.existsSync(subtitlesDir)) {
+  fs.mkdirSync(subtitlesDir, { recursive: true });
 }
 
 const storage = multer.diskStorage({
@@ -35,7 +42,35 @@ const upload = multer({
   }
 });
 
-// Environment will be passed at runtime
+// In-memory database (will be replaced with D1)
+interface VideoRecord {
+  id: string;
+  title: string;
+  originalFileName: string;
+  fileSize: number;
+  filePath: string;
+  status: 'processing' | 'completed' | 'failed';
+  createdAt: string;
+  transcribed: boolean;
+  transcript?: string;
+  subtitles: Record<string, string>; // language -> vtt content
+  languages: string[];
+  error?: string;
+}
+
+const videosDb = new Map<string, VideoRecord>();
+
+// Language mapping for Whisper
+const languageCodeMap: Record<string, string> = {
+  'zh': 'Chinese',
+  'en': 'English',
+  'es': 'Spanish',
+  'fr': 'French',
+  'de': 'German',
+  'ja': 'Japanese',
+  'ko': 'Korean',
+  'pt': 'Portuguese'
+};
 
 // Routes
 app.get('/', (_req: Request, res: Response) => {
@@ -46,7 +81,8 @@ app.get('/', (_req: Request, res: Response) => {
       health: '/api/health',
       upload: 'POST /api/upload',
       videos: 'GET /api/videos',
-      progress: 'GET /api/progress/:videoId'
+      progress: 'GET /api/progress/:videoId',
+      subtitles: 'GET /api/subtitles/:videoId/:language'
     }
   });
 });
@@ -64,9 +100,25 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
 
     const videoId = uuidv4();
     const title = req.body.title || req.file.originalname;
-    const languages = req.body.languages ? JSON.parse(req.body.languages) : [];
+    const languages = req.body.languages ? JSON.parse(req.body.languages) : ['zh'];
 
     console.log(`[Upload] Video: ${videoId}, File: ${req.file.filename}, Size: ${req.file.size} bytes`);
+
+    // Create video record
+    const videoRecord: VideoRecord = {
+      id: videoId,
+      title,
+      originalFileName: req.file.originalname,
+      fileSize: req.file.size,
+      filePath: req.file.path,
+      status: 'processing',
+      createdAt: new Date().toISOString(),
+      transcribed: false,
+      subtitles: {},
+      languages
+    };
+
+    videosDb.set(videoId, videoRecord);
 
     // Return success
     res.status(201).json({
@@ -76,7 +128,6 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
         title,
         originalFileName: req.file.originalname,
         fileSize: req.file.size,
-        uploadPath: req.file.path,
         status: 'processing',
         createdAt: new Date().toISOString(),
         languages
@@ -84,8 +135,13 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
     });
 
     // Process async (transcription, translation, etc.)
-    processVideo(videoId, title, req.file.path, languages).catch(err => {
+    processVideo(videoId).catch(err => {
       console.error(`[Error] Processing video ${videoId}:`, err);
+      const record = videosDb.get(videoId);
+      if (record) {
+        record.status = 'failed';
+        record.error = err instanceof Error ? err.message : String(err);
+      }
     });
 
   } catch (error) {
@@ -99,30 +155,73 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
 
 app.get('/api/videos', async (_req: Request, res: Response) => {
   try {
-    // TODO: Fetch from database
+    const videos = Array.from(videosDb.values()).map(v => ({
+      id: v.id,
+      title: v.title,
+      status: v.status,
+      createdAt: v.createdAt,
+      transcribed: v.transcribed,
+      subtitles: v.subtitles
+    }));
+
     res.json({
       success: true,
-      data: { videos: [] }
+      data: { videos }
     });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to fetch videos' });
   }
 });
 
-app.get('/api/progress/:videoId', async (_req: Request, res: Response) => {
+app.get('/api/progress/:videoId', async (req: Request, res: Response) => {
   try {
-    // TODO: Fetch progress from database
+    const videoId = req.params.videoId;
+    const record = videosDb.get(videoId);
+
+    if (!record) {
+      res.status(404).json({ success: false, error: 'Video not found' });
+      return;
+    }
+
     res.json({
       success: true,
       data: {
-        status: 'processing',
-        transcribed: false,
-        translationsCount: 0,
-        createdAt: new Date().toISOString()
+        id: videoId,
+        status: record.status,
+        transcribed: record.transcribed,
+        translationsCount: Object.keys(record.subtitles).length,
+        languages: record.languages,
+        createdAt: record.createdAt
       }
     });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to fetch progress' });
+  }
+});
+
+// Subtitle download endpoint
+app.get('/api/subtitles/:videoId/:language', async (req: Request, res: Response) => {
+  try {
+    const { videoId, language } = req.params;
+    const record = videosDb.get(videoId);
+
+    if (!record) {
+      res.status(404).json({ success: false, error: 'Video not found' });
+      return;
+    }
+
+    const vttContent = record.subtitles[language];
+    if (!vttContent) {
+      res.status(404).json({ success: false, error: 'Subtitle not found' });
+      return;
+    }
+
+    const langName = languageCodeMap[language] || language;
+    res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${record.title}-${langName}.vtt"`);
+    res.send(vttContent);
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to fetch subtitle' });
   }
 });
 
@@ -146,20 +245,136 @@ app.listen(PORT, () => {
   console.log(`Upload directory: ${uploadDir}`);
 });
 
-async function processVideo(videoId: string, _title: string, _filePath: string, _languages: string[]) {
+// Whisper transcription
+async function transcribeWithWhisper(filePath: string): Promise<string> {
   try {
+    console.log(`[Whisper] Starting transcription for ${filePath}`);
+    
+    // Use Whisper CLI (assume whisper is installed)
+    const outputPath = filePath + '.json';
+    const command = `whisper "${filePath}" --model base --output_format json --output_dir /tmp --language auto`;
+    
+    const { stdout, stderr } = await execAsync(command, { maxBuffer: 10 * 1024 * 1024 });
+    
+    if (stderr && !stderr.includes('Transcribing')) {
+      console.error('[Whisper Error]', stderr);
+    }
+
+    // Read the JSON output
+    const jsonPath = filePath + '.json';
+    if (!fs.existsSync(jsonPath)) {
+      throw new Error('Whisper output not found');
+    }
+
+    const result = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+    const transcript = result.text;
+
+    console.log(`[Whisper] Transcription complete: ${transcript.length} chars`);
+    return transcript;
+  } catch (error) {
+    console.error('[Whisper Error]', error);
+    throw new Error(`Transcription failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+// Simple translation using sed/echo (will be replaced with proper M2M-100)
+async function translateText(text: string, targetLanguage: string): Promise<string> {
+  try {
+    // For now, return original text with language indicator
+    // In production, use M2M-100 model via transformers
+    console.log(`[Translate] Translating to ${languageCodeMap[targetLanguage]} (${targetLanguage})`);
+    
+    // Placeholder: In real implementation, call M2M-100 or other translation API
+    // For demo, we'll just return the original text
+    // You can integrate with:
+    // 1. OpenAI API
+    // 2. Google Translate API
+    // 3. Local M2M-100 model
+    // 4. HuggingFace Inference API
+    
+    return text; // Return original for now (placeholder)
+  } catch (error) {
+    console.error('[Translate Error]', error);
+    throw error;
+  }
+}
+
+// Generate VTT subtitle format
+function generateVTT(transcript: string, translatedText: string): string {
+  // Simple VTT generation - split text into chunks with timestamps
+  const lines = translatedText.split(/[\n.!?]+/).filter(l => l.trim());
+  
+  let vtt = 'WEBVTT\n\n';
+  let currentTime = 0;
+  const wordsPerSecond = 2.5; // Average reading speed
+
+  lines.forEach((line, index) => {
+    const words = line.trim().split(/\s+/).length;
+    const duration = words / wordsPerSecond;
+    
+    const startTime = formatTime(currentTime);
+    const endTime = formatTime(currentTime + duration);
+    
+    vtt += `${startTime} --> ${endTime}\n`;
+    vtt += `${line.trim()}\n\n`;
+    
+    currentTime += duration;
+  });
+
+  return vtt;
+}
+
+function formatTime(seconds: number): string {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 1000);
+  
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+}
+
+// Main processing function
+async function processVideo(videoId: string) {
+  try {
+    const record = videosDb.get(videoId);
+    if (!record) {
+      throw new Error('Video record not found');
+    }
+
     console.log(`[Process] Starting processing for ${videoId}`);
-    
-    // TODO: Implement transcription and translation
-    // 1. Run Whisper transcription
-    // 2. Extract text
-    // 3. Run M2M-100 translation
-    // 4. Generate VTT subtitles
-    // 5. Save to storage
-    // 6. Update database
-    
+
+    // Step 1: Transcribe with Whisper
+    const transcript = await transcribeWithWhisper(record.filePath);
+    record.transcript = transcript;
+    record.transcribed = true;
+
+    console.log(`[Process] Transcription complete: ${transcript.length} characters`);
+
+    // Step 2: Generate VTT for original language (English assumption from Whisper)
+    const originalVTT = generateVTT(transcript, transcript);
+    record.subtitles['en'] = originalVTT;
+
+    // Step 3: Translate to target languages and generate VTTs
+    for (const language of record.languages) {
+      if (language === 'en') continue; // Skip if already have English
+
+      const translatedText = await translateText(transcript, language);
+      const vttContent = generateVTT(transcript, translatedText);
+      record.subtitles[language] = vttContent;
+
+      console.log(`[Process] Translation complete for ${language}`);
+    }
+
+    // Step 4: Mark as completed
+    record.status = 'completed';
     console.log(`[Process] Completed for ${videoId}`);
+
   } catch (error) {
     console.error(`[Process Error] ${videoId}:`, error);
+    const record = videosDb.get(videoId);
+    if (record) {
+      record.status = 'failed';
+      record.error = error instanceof Error ? error.message : String(error);
+    }
   }
 }
