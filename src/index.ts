@@ -4,6 +4,8 @@ interface Env {
   CONTAINER: any;
   AI: any;
   DB: any;
+  R2_BUCKET?: R2Bucket;
+  SENDGRID_API_KEY?: string;
 }
 
 const HTML_CONTENT = `<!DOCTYPE html>
@@ -525,6 +527,910 @@ export class VideoSubtitleContainer extends Container {
   sleepAfter = "30m";
 }
 
+// Transcription Service Class
+class TranscriptionService {
+  private ai: any;
+
+  constructor(ai: any) {
+    if (!ai) {
+      throw new Error('AI binding not configured');
+    }
+    this.ai = ai;
+  }
+
+  /**
+   * 使用 Whisper 转录音频（带重试）
+   */
+  async transcribeAudio(audioBuffer: ArrayBuffer, maxRetries: number = 3): Promise<{
+    text: string;
+    language: string;
+    confidence: number;
+  }> {
+    const audioArray = Array.from(new Uint8Array(audioBuffer));
+
+    console.log(`[Whisper] 开始转录，文件大小: ${Math.round(audioBuffer.byteLength / 1024)}KB`);
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const response = await this.ai.run('@cf/openai/whisper', {
+          audio: audioArray,
+        }) as any;
+
+        const text = response.result?.text || '';
+        const language = response.result?.language || 'english';
+        const confidence = response.result?.confidence || 0.8;
+
+        console.log(`[Whisper] 转录完成（尝试 ${attempt + 1}）: ${text.substring(0, 100)}... (${language})`);
+
+        return {
+          text,
+          language: this.normalizeLanguage(language),
+          confidence,
+        };
+      } catch (error) {
+        console.error(`[Whisper] 转录失败（尝试 ${attempt + 1}/${maxRetries}）:`, error);
+
+        if (attempt === maxRetries - 1) {
+          // 最后一次尝试失败，抛出错误
+          throw new Error(`Transcription failed after ${maxRetries} attempts: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+
+        // 指数退避等待
+        const waitTime = Math.pow(2, attempt) * 1000;
+        console.log(`[Whisper] 等待 ${waitTime}ms 后重试...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
+    }
+
+    throw new Error('Transcription failed: Unknown error');
+  }
+
+  /**
+   * 使用 M2M-100 翻译文本（带重试）
+   */
+  async translateText(
+    text: string,
+    targetLanguage: string,
+    sourceLanguage: string = 'en',
+    maxRetries: number = 2
+  ): Promise<string> {
+    const languageMap: Record<string, string> = {
+      'zh': 'zho',      // 中文
+      'en': 'eng',      // 英文
+      'es': 'spa',      // 西班牙语
+      'fr': 'fra',      // 法语
+      'de': 'deu',      // 德语
+      'ja': 'jpn',      // 日语
+      'ko': 'kor',      // 韩语
+      'pt': 'por',      // 葡萄牙语
+      'ru': 'rus',      // 俄语
+      'it': 'ita',      // 意大利语
+    };
+
+    const sourceLangCode = languageMap[sourceLanguage] || 'eng';
+    const targetLangCode = languageMap[targetLanguage] || 'eng';
+
+    console.log(`[M2M-100] 翻译: ${sourceLanguage}(${sourceLangCode}) → ${targetLanguage}(${targetLangCode})`);
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const response = await this.ai.run('@cf/meta/m2m-100-12b-last-ckpt', {
+          text,
+          source_lang: sourceLangCode,
+          target_lang: targetLangCode,
+        }) as any;
+
+        const translatedText = response.result?.translated_text || text;
+
+        console.log(`[M2M-100] 翻译完成（尝试 ${attempt + 1}）: ${translatedText.substring(0, 100)}...`);
+
+        return translatedText;
+      } catch (error) {
+        console.error(`[M2M-100] 翻译失败（尝试 ${attempt + 1}/${maxRetries}）:`, error);
+
+        if (attempt === maxRetries - 1) {
+          // 最后一次尝试失败，返回原文本作为降级方案
+          console.warn(`[M2M-100] 翻译失败，使用原文本`);
+          return text;
+        }
+
+        // 短暂等待后重试
+        const waitTime = Math.pow(2, attempt) * 500;
+        console.log(`[M2M-100] 等待 ${waitTime}ms 后重试...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
+    }
+
+    return text; // 降级方案：返回原文本
+  }
+
+  /**
+   * 生成 VTT 字幕文件
+   */
+  generateVTT(text: string, language: string = 'en'): string {
+    // 简化版本：分割文本为较小的段落并生成 VTT
+    const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+    
+    let vtt = 'WEBVTT\n\n';
+    let currentTime = 0;
+    const wordsPerSecond = 2.5; // 平均每秒字数
+
+    for (const sentence of sentences) {
+      const trimmed = sentence.trim();
+      if (!trimmed) continue;
+
+      const words = trimmed.split(/\s+/).length;
+      const duration = Math.max(words / wordsPerSecond, 1);
+
+      const startTime = this.formatTime(currentTime);
+      const endTime = this.formatTime(currentTime + duration);
+
+      vtt += `${startTime} --> ${endTime}\n`;
+      vtt += `${trimmed}\n\n`;
+
+      currentTime += duration;
+    }
+
+    return vtt;
+  }
+
+  /**
+   * 格式化时间为 VTT 格式
+   */
+  private formatTime(seconds: number): string {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    const millis = Math.floor((seconds % 1) * 1000);
+
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(millis).padStart(3, '0')}`;
+  }
+
+  /**
+   * 规范化语言代码
+   */
+  private normalizeLanguage(language: string): string {
+    const langMap: Record<string, string> = {
+      'english': 'en',
+      'chinese': 'zh',
+      'spanish': 'es',
+      'french': 'fr',
+      'german': 'de',
+      'japanese': 'ja',
+      'korean': 'ko',
+      'portuguese': 'pt',
+      'russian': 'ru',
+      'italian': 'it',
+    };
+
+    return langMap[language.toLowerCase()] || language.substring(0, 2).toLowerCase();
+  }
+
+  /**
+   * 检查是否支持语言
+   */
+  isSupportedLanguage(languageCode: string): boolean {
+    const supportedLanguages = ['zh', 'en', 'es', 'fr', 'de', 'ja', 'ko', 'pt', 'ru', 'it'];
+    return supportedLanguages.includes(languageCode.toLowerCase());
+  }
+
+  /**
+   * 获取所有支持的语言
+   */
+  getSupportedLanguages(): Array<{ code: string; name: string }> {
+    return [
+      { code: 'zh', name: 'Chinese' },
+      { code: 'en', name: 'English' },
+      { code: 'es', name: 'Spanish' },
+      { code: 'fr', name: 'French' },
+      { code: 'de', name: 'German' },
+      { code: 'ja', name: 'Japanese' },
+      { code: 'ko', name: 'Korean' },
+      { code: 'pt', name: 'Portuguese' },
+      { code: 'ru', name: 'Russian' },
+      { code: 'it', name: 'Italian' },
+    ];
+  }
+}
+
+// R2 Storage Service Class
+class R2StorageService {
+  private bucket: R2Bucket;
+  private baseUrl: string = 'https://r2.myzhangyujie.com';
+
+  constructor(env: Env) {
+    if (!env.R2_BUCKET) {
+      throw new Error('R2_BUCKET binding not configured');
+    }
+    this.bucket = env.R2_BUCKET;
+  }
+
+  /**
+   * 上传视频文件到 R2
+   */
+  async uploadVideo(
+    userId: string,
+    videoId: string,
+    fileData: ArrayBuffer,
+    fileName: string,
+    contentType: string
+  ): Promise<{ url: string; key: string }> {
+    const fileExtension = fileName.split('.').pop() || 'mp4';
+    const key = `users/${userId}/videos/${videoId}/original.${fileExtension}`;
+
+    try {
+      await this.bucket.put(key, fileData, {
+        httpMetadata: {
+          contentType,
+          cacheControl: 'max-age=31536000', // 1 年缓存（视频不常修改）
+        },
+      });
+
+      const url = `${this.baseUrl}/${key}`;
+      console.log(`[R2] Video uploaded: ${key} (${Math.round(fileData.byteLength / 1024 / 1024)} MB)`);
+
+      return { url, key };
+    } catch (error) {
+      console.error('[R2] Upload error:', error);
+      throw new Error('Failed to upload video to R2');
+    }
+  }
+
+  /**
+   * 上传字幕到 R2
+   */
+  async uploadSubtitle(
+    videoId: string,
+    language: string,
+    vttContent: string
+  ): Promise<string> {
+    const key = `videos/${videoId}/subtitles/${language}.vtt`;
+
+    try {
+      await this.bucket.put(key, vttContent, {
+        httpMetadata: {
+          contentType: 'text/vtt;charset=utf-8',
+          cacheControl: 'max-age=86400', // 1 天缓存
+        },
+      });
+
+      const url = `${this.baseUrl}/${key}`;
+      console.log(`[R2] Subtitle uploaded: ${key}`);
+
+      return url;
+    } catch (error) {
+      console.error('[R2] Subtitle upload error:', error);
+      throw new Error('Failed to upload subtitle to R2');
+    }
+  }
+
+  /**
+   * 获取视频 URL
+   */
+  getVideoUrl(userId: string, videoId: string, fileExtension: string = 'mp4'): string {
+    return `${this.baseUrl}/users/${userId}/videos/${videoId}/original.${fileExtension}`;
+  }
+
+  /**
+   * 获取字幕 URL
+   */
+  getSubtitleUrl(videoId: string, language: string): string {
+    return `${this.baseUrl}/videos/${videoId}/subtitles/${language}.vtt`;
+  }
+
+  /**
+   * 删除视频及其所有相关文件
+   */
+  async deleteVideo(userId: string, videoId: string): Promise<void> {
+    const prefix = `users/${userId}/videos/${videoId}/`;
+
+    try {
+      const listResponse = await this.bucket.list({ prefix });
+
+      // 删除所有匹配的文件
+      const deletePromises = listResponse.objects.map((obj) =>
+        this.bucket.delete(obj.key)
+      );
+
+      await Promise.all(deletePromises);
+      console.log(`[R2] Deleted video folder: ${prefix}`);
+    } catch (error) {
+      console.error('[R2] Delete error:', error);
+      throw new Error('Failed to delete video from R2');
+    }
+  }
+
+  /**
+   * 获取视频元数据（大小、上传时间等）
+   */
+  async getVideoMetadata(userId: string, videoId: string, fileExtension: string): Promise<any> {
+    const key = `users/${userId}/videos/${videoId}/original.${fileExtension}`;
+
+    try {
+      const object = await this.bucket.head(key);
+
+      return {
+        key,
+        size: object?.size || 0,
+        uploadedAt: object?.uploaded || new Date(),
+        contentType: object?.httpMetadata?.contentType || 'video/mp4',
+      };
+    } catch (error) {
+      console.error('[R2] Metadata error:', error);
+      return null;
+    }
+  }
+
+  /**
+   * 上传视频元数据 JSON
+   */
+  async uploadMetadata(
+    userId: string,
+    videoId: string,
+    metadata: any
+  ): Promise<string> {
+    const key = `users/${userId}/videos/${videoId}/metadata.json`;
+    const jsonContent = JSON.stringify(metadata, null, 2);
+
+    try {
+      await this.bucket.put(key, jsonContent, {
+        httpMetadata: {
+          contentType: 'application/json',
+          cacheControl: 'max-age=3600', // 1 小时缓存
+        },
+      });
+
+      console.log(`[R2] Metadata uploaded: ${key}`);
+      return `${this.baseUrl}/${key}`;
+    } catch (error) {
+      console.error('[R2] Metadata upload error:', error);
+      throw new Error('Failed to upload metadata to R2');
+    }
+  }
+}
+
+// Email Service Class
+class EmailService {
+  private env: Env;
+
+  constructor(env: Env) {
+    this.env = env;
+  }
+
+  async sendVerificationEmail(
+    email: string,
+    fullName: string,
+    token: string
+  ): Promise<boolean> {
+    const verificationLink = `https://subtitle.myzhangyujie.com/api/auth/verify?token=${token}`;
+    const html = buildVerificationEmailHtml(fullName, verificationLink);
+    const text = `Please verify your email by visiting: ${verificationLink}`;
+
+    return await this.sendEmail({
+      to: email,
+      subject: 'Verify your email - Video Subtitle Translator',
+      html,
+      text
+    });
+  }
+
+  async sendWelcomeEmail(
+    email: string,
+    fullName: string
+  ): Promise<boolean> {
+    const html = buildWelcomeEmailHtml(fullName);
+    const text = 'Welcome to Video Subtitle Translator! Your account is now activated.';
+
+    return await this.sendEmail({
+      to: email,
+      subject: 'Welcome to Video Subtitle Translator',
+      html,
+      text
+    });
+  }
+
+  async sendPasswordResetEmail(
+    email: string,
+    fullName: string,
+    token: string
+  ): Promise<boolean> {
+    const resetLink = `https://subtitle.myzhangyujie.com/reset-password?token=${token}`;
+    const html = buildPasswordResetEmailHtml(fullName, resetLink);
+    const text = `Reset your password by visiting: ${resetLink}`;
+
+    return await this.sendEmail({
+      to: email,
+      subject: 'Reset your password - Video Subtitle Translator',
+      html,
+      text
+    });
+  }
+
+  private async sendEmail(options: {
+    to: string;
+    subject: string;
+    html: string;
+    text: string;
+  }): Promise<boolean> {
+    try {
+      const response = await fetch('https://api.mailchannels.net/tx/v1/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          personalizations: [
+            {
+              to: [{ email: options.to }],
+              dkim_domain: 'subtitle.myzhangyujie.com'
+            }
+          ],
+          from: {
+            email: 'noreply@subtitle.myzhangyujie.com',
+            name: 'Video Subtitle Translator'
+          },
+          subject: options.subject,
+          content: [
+            { type: 'text/html', value: options.html },
+            { type: 'text/plain', value: options.text }
+          ]
+        })
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        console.error('[Email Error] MailChannels API error:', error);
+        return false;
+      }
+
+      console.log(`[Email] Email sent to ${options.to}: ${options.subject}`);
+      return true;
+    } catch (error) {
+      console.error('[Email Error]', error);
+      return false;
+    }
+  }
+}
+
+// QuotaService: Manages user quotas for storage, transcriptions, and daily processing
+class QuotaService {
+  private env: Env;
+
+  constructor(env: Env) {
+    this.env = env;
+  }
+
+  /**
+   * Check if user has sufficient quota for upload
+   */
+  async canUpload(
+    userId: string,
+    fileSizeBytes: number,
+    db: D1Database
+  ): Promise<{ allowed: boolean; reason?: string }> {
+    try {
+      const user = await db
+        .prepare('SELECT quota_storage_gb, storage_used_gb FROM users WHERE id = ?')
+        .bind(userId)
+        .first<any>();
+
+      if (!user) {
+        return { allowed: false, reason: 'User not found' };
+      }
+
+      const fileSizeGb = fileSizeBytes / (1024 * 1024 * 1024);
+      const remainingQuota = user.quota_storage_gb - user.storage_used_gb;
+
+      if (fileSizeGb > remainingQuota) {
+        return {
+          allowed: false,
+          reason: `Insufficient storage quota. Required: ${fileSizeGb.toFixed(2)}GB, Available: ${remainingQuota.toFixed(2)}GB`
+        };
+      }
+
+      return { allowed: true };
+    } catch (error) {
+      console.error('[QuotaService] Error checking upload quota:', error);
+      return { allowed: false, reason: 'Error checking quota' };
+    }
+  }
+
+  /**
+   * Check if user has sufficient quota for transcription
+   */
+  async canTranscribe(
+    userId: string,
+    db: D1Database
+  ): Promise<{ allowed: boolean; reason?: string }> {
+    try {
+      const user = await db
+        .prepare(
+          'SELECT quota_transcriptions, transcriptions_this_month FROM users WHERE id = ?'
+        )
+        .bind(userId)
+        .first<any>();
+
+      if (!user) {
+        return { allowed: false, reason: 'User not found' };
+      }
+
+      const remainingTranscriptions =
+        user.quota_transcriptions - user.transcriptions_this_month;
+
+      if (remainingTranscriptions <= 0) {
+        return {
+          allowed: false,
+          reason: `Transcription quota exceeded. Monthly limit: ${user.quota_transcriptions}, used: ${user.transcriptions_this_month}`
+        };
+      }
+
+      return { allowed: true };
+    } catch (error) {
+      console.error('[QuotaService] Error checking transcription quota:', error);
+      return { allowed: false, reason: 'Error checking quota' };
+    }
+  }
+
+  /**
+   * Check daily processing quota
+   */
+  async canProcessDaily(
+    userId: string,
+    additionalGb: number,
+    db: D1Database
+  ): Promise<{ allowed: boolean; reason?: string }> {
+    try {
+      const user = await db
+        .prepare(
+          'SELECT quota_daily_processing_gb, processing_today_gb, processing_date_reset FROM users WHERE id = ?'
+        )
+        .bind(userId)
+        .first<any>();
+
+      if (!user) {
+        return { allowed: false, reason: 'User not found' };
+      }
+
+      // Check if we need to reset daily quota (midnight in user's timezone)
+      const today = new Date().toISOString().split('T')[0];
+      if (user.processing_date_reset !== today) {
+        // Reset daily quota
+        await this.resetDailyQuota(userId, db);
+        return { allowed: true };
+      }
+
+      const remainingDaily =
+        user.quota_daily_processing_gb - user.processing_today_gb;
+
+      if (additionalGb > remainingDaily) {
+        return {
+          allowed: false,
+          reason: `Daily processing quota exceeded. Limit: ${user.quota_daily_processing_gb}GB, used: ${user.processing_today_gb}GB, additional: ${additionalGb}GB`
+        };
+      }
+
+      return { allowed: true };
+    } catch (error) {
+      console.error('[QuotaService] Error checking daily processing quota:', error);
+      return { allowed: false, reason: 'Error checking quota' };
+    }
+  }
+
+  /**
+   * Consume storage quota after upload
+   */
+  async consumeStorageQuota(
+    userId: string,
+    fileSizeBytes: number,
+    db: D1Database
+  ): Promise<boolean> {
+    try {
+      const fileSizeGb = fileSizeBytes / (1024 * 1024 * 1024);
+      await db
+        .prepare(
+          'UPDATE users SET storage_used_gb = storage_used_gb + ? WHERE id = ?'
+        )
+        .bind(fileSizeGb, userId)
+        .run();
+
+      console.log(
+        `[QuotaService] Consumed ${fileSizeGb.toFixed(2)}GB storage for user ${userId}`
+      );
+      return true;
+    } catch (error) {
+      console.error('[QuotaService] Error consuming storage quota:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Consume transcription quota
+   */
+  async consumeTranscriptionQuota(userId: string, db: D1Database): Promise<boolean> {
+    try {
+      await db
+        .prepare(
+          'UPDATE users SET transcriptions_this_month = transcriptions_this_month + 1 WHERE id = ?'
+        )
+        .bind(userId)
+        .run();
+
+      console.log(`[QuotaService] Consumed transcription for user ${userId}`);
+      return true;
+    } catch (error) {
+      console.error('[QuotaService] Error consuming transcription quota:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Consume daily processing quota
+   */
+  async consumeDailyProcessingQuota(
+    userId: string,
+    fileSizeBytes: number,
+    db: D1Database
+  ): Promise<boolean> {
+    try {
+      const fileSizeGb = fileSizeBytes / (1024 * 1024 * 1024);
+      await db
+        .prepare(
+          'UPDATE users SET processing_today_gb = processing_today_gb + ? WHERE id = ?'
+        )
+        .bind(fileSizeGb, userId)
+        .run();
+
+      console.log(
+        `[QuotaService] Consumed ${fileSizeGb.toFixed(2)}GB daily processing for user ${userId}`
+      );
+      return true;
+    } catch (error) {
+      console.error(
+        '[QuotaService] Error consuming daily processing quota:',
+        error
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Reset daily processing quota (called at midnight)
+   */
+  private async resetDailyQuota(userId: string, db: D1Database): Promise<void> {
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      await db
+        .prepare(
+          'UPDATE users SET processing_today_gb = 0, processing_date_reset = ? WHERE id = ?'
+        )
+        .bind(today, userId)
+        .run();
+
+      console.log(`[QuotaService] Reset daily quota for user ${userId}`);
+    } catch (error) {
+      console.error('[QuotaService] Error resetting daily quota:', error);
+    }
+  }
+
+  /**
+   * Get user quota status
+   */
+  async getQuotaStatus(userId: string, db: D1Database): Promise<any> {
+    try {
+      const user = await db
+        .prepare(
+          `SELECT 
+            quota_storage_gb, storage_used_gb,
+            quota_transcriptions, transcriptions_this_month,
+            quota_daily_processing_gb, processing_today_gb,
+            processing_date_reset
+          FROM users WHERE id = ?`
+        )
+        .bind(userId)
+        .first<any>();
+
+      if (!user) {
+        return null;
+      }
+
+      // Check if daily quota needs reset
+      const today = new Date().toISOString().split('T')[0];
+      if (user.processing_date_reset !== today) {
+        await this.resetDailyQuota(userId, db);
+        user.processing_today_gb = 0;
+        user.processing_date_reset = today;
+      }
+
+      return {
+        storage: {
+          limit: user.quota_storage_gb,
+          used: user.storage_used_gb,
+          remaining: user.quota_storage_gb - user.storage_used_gb,
+          percentage: Math.round(
+            (user.storage_used_gb / user.quota_storage_gb) * 100
+          )
+        },
+        transcriptions: {
+          limit: user.quota_transcriptions,
+          used: user.transcriptions_this_month,
+          remaining: user.quota_transcriptions - user.transcriptions_this_month,
+          percentage: Math.round(
+            (user.transcriptions_this_month / user.quota_transcriptions) * 100
+          )
+        },
+        dailyProcessing: {
+          limit: user.quota_daily_processing_gb,
+          used: user.processing_today_gb,
+          remaining:
+            user.quota_daily_processing_gb - user.processing_today_gb,
+          percentage: Math.round(
+            (user.processing_today_gb / user.quota_daily_processing_gb) * 100
+          ),
+          resetDate: user.processing_date_reset
+        }
+      };
+    } catch (error) {
+      console.error('[QuotaService] Error getting quota status:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Log user action for audit trail
+   */
+  async logAction(
+    userId: string,
+    action: string,
+    resourceType: string | null,
+    resourceId: string | null,
+    details: any,
+    db: D1Database
+  ): Promise<void> {
+    try {
+      const id = `log_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      await db
+        .prepare(
+          `INSERT INTO audit_logs (id, user_id, action, resource_type, resource_id, details, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+        )
+        .bind(
+          id,
+          userId,
+          action,
+          resourceType || null,
+          resourceId || null,
+          JSON.stringify(details)
+        )
+        .run();
+
+      console.log(`[QuotaService] Logged action: ${action} for user ${userId}`);
+    } catch (error) {
+      console.error('[QuotaService] Error logging action:', error);
+    }
+  }
+}
+
+// Email Template Builder Functions
+function buildVerificationEmailHtml(fullName: string, verificationLink: string): string {
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Verification</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 0; background-color: #f5f5f5;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="background-color: white; border-radius: 12px; padding: 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+            <h1 style="color: #333; font-size: 24px; margin-bottom: 10px;">Welcome to Video Subtitle Translator!</h1>
+            <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+                Hi <strong>${fullName}</strong>,
+            </p>
+            <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
+                Thank you for signing up! To complete your registration, please verify your email address by clicking the button below.
+            </p>
+            <div style="text-align: center; margin-bottom: 30px;">
+                <a href="${verificationLink}" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 30px; border-radius: 6px; text-decoration: none; font-weight: 600; display: inline-block;">
+                    Verify Email
+                </a>
+            </div>
+            <p style="color: #999; font-size: 12px; line-height: 1.6; margin-top: 30px; border-top: 1px solid #eee; padding-top: 20px;">
+                Or copy and paste this link in your browser:<br>
+                <code style="color: #667eea; word-break: break-all;">${verificationLink}</code>
+            </p>
+            <p style="color: #999; font-size: 12px; margin-top: 20px;">
+                If you didn't create this account, you can safely ignore this email.
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+  `;
+}
+
+function buildWelcomeEmailHtml(fullName: string): string {
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Welcome</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 0; background-color: #f5f5f5;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="background-color: white; border-radius: 12px; padding: 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+            <h1 style="color: #333; font-size: 24px; margin-bottom: 10px;">🎉 Your account is ready!</h1>
+            <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+                Hi <strong>${fullName}</strong>,
+            </p>
+            <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+                Your email has been verified and your account is now active. You can now:
+            </p>
+            <ul style="color: #666; font-size: 16px; line-height: 1.8; margin-bottom: 30px;">
+                <li>📤 Upload videos up to 500MB</li>
+                <li>🎯 Transcribe audio with AI Whisper</li>
+                <li>🌐 Translate to 8+ languages</li>
+                <li>📊 View your usage statistics</li>
+                <li>🔒 Secure storage in Cloudflare R2</li>
+            </ul>
+            <div style="text-align: center; margin-bottom: 30px;">
+                <a href="https://subtitle.myzhangyujie.com/" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 30px; border-radius: 6px; text-decoration: none; font-weight: 600; display: inline-block;">
+                    Go to Dashboard
+                </a>
+            </div>
+            <p style="color: #666; font-size: 14px; line-height: 1.6; margin-top: 30px; border-top: 1px solid #eee; padding-top: 20px;">
+                <strong>Your quota for this month:</strong><br>
+                • Storage: 10GB<br>
+                • Transcriptions: 100<br>
+                • Daily processing: 10GB
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+  `;
+}
+
+function buildPasswordResetEmailHtml(fullName: string, resetLink: string): string {
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Password Reset</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 0; background-color: #f5f5f5;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="background-color: white; border-radius: 12px; padding: 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+            <h1 style="color: #333; font-size: 24px; margin-bottom: 10px;">Password Reset Request</h1>
+            <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+                Hi <strong>${fullName}</strong>,
+            </p>
+            <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
+                We received a request to reset your password. Click the button below to set a new password.
+            </p>
+            <div style="text-align: center; margin-bottom: 30px;">
+                <a href="${resetLink}" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px 30px; border-radius: 6px; text-decoration: none; font-weight: 600; display: inline-block;">
+                    Reset Password
+                </a>
+            </div>
+            <p style="color: #999; font-size: 12px; line-height: 1.6; margin-top: 30px; border-top: 1px solid #eee; padding-top: 20px;">
+                Or copy and paste this link in your browser:<br>
+                <code style="color: #667eea; word-break: break-all;">${resetLink}</code>
+            </p>
+            <p style="color: #999; font-size: 12px; margin-top: 20px;">
+                This link will expire in 24 hours. If you didn't request this, you can safely ignore this email.
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+  `;
+}
+
 // 认证路由处理
 async function handleAuth(request: Request, env: Env) {
   const url = new URL(request.url);
@@ -540,9 +1446,14 @@ async function handleAuth(request: Request, env: Env) {
     return await handleLogin(request, env);
   }
 
-  // 验证 email
+  // 验证 email (POST 请求 - 用于 API)
   if (path === '/api/auth/verify' && request.method === 'POST') {
-    return await handleVerifyEmail(request, env);
+    return await handleVerifyEmailAPI(request, env);
+  }
+
+  // 验证 email (GET 请求 - 用于邮件链接)
+  if (path === '/api/auth/verify' && request.method === 'GET') {
+    return await handleVerifyEmailLink(request, env);
   }
 
   return new Response(JSON.stringify({ success: false, error: 'Not found' }), {
@@ -587,13 +1498,27 @@ async function handleRegister(request: Request, env: Env) {
 
     console.log(`[Auth] User registered: ${email}`);
 
+    // 发送验证邮件
+    const emailService = new EmailService(env);
+    const emailSent = await emailService.sendVerificationEmail(
+      email,
+      fullName,
+      verificationToken
+    );
+
+    if (!emailSent) {
+      console.warn(`[Auth] Failed to send verification email to ${email}, but user was created`);
+    }
+
     return new Response(
       JSON.stringify({
         success: true,
         data: {
           id: userId,
           email,
-          message: 'Registration successful. Please verify your email.'
+          message: emailSent 
+            ? 'Registration successful. Please check your email to verify your account.'
+            : 'Registration successful. But we had trouble sending the verification email. Please contact support.'
         }
       }),
       { status: 201, headers: { 'Content-Type': 'application/json' } }
@@ -674,7 +1599,7 @@ async function handleLogin(request: Request, env: Env) {
   }
 }
 
-async function handleVerifyEmail(request: Request, env: Env) {
+async function handleVerifyEmailAPI(request: Request, env: Env) {
   try {
     const { userId, token } = await request.json() as any;
 
@@ -702,6 +1627,10 @@ async function handleVerifyEmail(request: Request, env: Env) {
       .bind(userId)
       .run();
 
+    // 发送欢迎邮件
+    const emailService = new EmailService(env);
+    await emailService.sendWelcomeEmail(user.email, user.full_name);
+
     console.log(`[Auth] Email verified: ${user.email}`);
 
     return new Response(
@@ -716,6 +1645,211 @@ async function handleVerifyEmail(request: Request, env: Env) {
       { status: 500, headers: { 'Content-Type': 'application/json' } }
     );
   }
+}
+
+async function handleVerifyEmailLink(request: Request, env: Env) {
+  try {
+    const url = new URL(request.url);
+    const token = url.searchParams.get('token');
+
+    if (!token) {
+      return new Response(
+        buildVerifyErrorHTML('Missing verification token'),
+        { status: 400, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+      );
+    }
+
+    // 通过 token 查找用户
+    const user = await env.DB.prepare('SELECT * FROM users WHERE verification_token = ?')
+      .bind(token)
+      .first() as any;
+
+    if (!user) {
+      return new Response(
+        buildVerifyErrorHTML('Invalid or expired verification token'),
+        { status: 400, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+      );
+    }
+
+    // 标记为已验证
+    await env.DB.prepare('UPDATE users SET verified = 1, verification_token = NULL WHERE id = ?')
+      .bind(user.id)
+      .run();
+
+    // 发送欢迎邮件
+    const emailService = new EmailService(env);
+    await emailService.sendWelcomeEmail(user.email, user.full_name);
+
+    console.log(`[Auth] Email verified via link: ${user.email}`);
+
+    return new Response(
+      buildVerifySuccessHTML(user.full_name),
+      { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+    );
+
+  } catch (error) {
+    console.error('[Verify Error]', error);
+    return new Response(
+      buildVerifyErrorHTML('An error occurred during verification'),
+      { status: 500, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+    );
+  }
+}
+
+function buildVerifySuccessHTML(fullName: string): string {
+  return `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>邮箱验证成功</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+            max-width: 500px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }
+        .icon {
+            font-size: 60px;
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #333;
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+        p {
+            color: #666;
+            font-size: 16px;
+            line-height: 1.6;
+            margin-bottom: 30px;
+        }
+        .button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 12px 30px;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            transition: all 0.3s;
+        }
+        .button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon">✅</div>
+        <h1>邮箱验证成功！</h1>
+        <p>亲爱的 <strong>${fullName}</strong>,</p>
+        <p>您的邮箱已验证，账户已激活。您现在可以使用所有功能。</p>
+        <a href="https://subtitle.myzhangyujie.com/" class="button">前往应用</a>
+    </div>
+</body>
+</html>
+  `;
+}
+
+function buildVerifyErrorHTML(message: string): string {
+  return `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>邮箱验证失败</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+            max-width: 500px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }
+        .icon {
+            font-size: 60px;
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #333;
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+        p {
+            color: #666;
+            font-size: 16px;
+            line-height: 1.6;
+            margin-bottom: 30px;
+        }
+        .error-message {
+            background: #ffebee;
+            color: #c62828;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            border-left: 4px solid #f44336;
+        }
+        .button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 12px 30px;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            transition: all 0.3s;
+        }
+        .button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon">❌</div>
+        <h1>邮箱验证失败</h1>
+        <div class="error-message">${message}</div>
+        <p>请检查验证链接是否正确或者重新注册。</p>
+        <a href="https://subtitle.myzhangyujie.com/" class="button">返回首页</a>
+    </div>
+</body>
+</html>
+  `;
 }
 
 // Helper functions
@@ -839,89 +1973,128 @@ async function handleTranscription(request: Request, env: Env) {
 
 async function triggerTranscription(request: Request, env: Env) {
   try {
-    const { videoId, filePath, languages, title } = await request.json() as any;
+    const { videoId, filePath, languages = ['zh', 'en'], title } = await request.json() as any;
 
-    if (!videoId || !filePath) {
-      return new Response(JSON.stringify({ success: false, error: 'Missing parameters' }), {
+    if (!videoId) {
+      return new Response(JSON.stringify({ success: false, error: 'Missing videoId' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    console.log(`[Worker] Transcribing video ${videoId}: ${title}`);
+    console.log(`[Transcription] Starting for video ${videoId}: ${title}`);
 
-    // Read file from container storage
+    // Initialize services
+    const transcriptionService = new TranscriptionService(env.AI);
+    const r2Service = new R2StorageService(env);
+
+    // Step 1: Fetch audio file from Container
+    console.log(`[Transcription] Fetching audio file from container`);
     const fileContent = await fetch(`http://localhost:3000/api/get-file/${videoId}`, {
       method: 'GET'
     });
 
     if (!fileContent.ok) {
-      throw new Error('Failed to fetch file from container');
+      throw new Error('Failed to fetch audio file from container');
     }
 
     const arrayBuffer = await fileContent.arrayBuffer();
-    const audioArray = Array.from(new Uint8Array(arrayBuffer));
+    console.log(`[Transcription] Audio file loaded: ${Math.round(arrayBuffer.byteLength / 1024 / 1024)}MB`);
 
-    // Step 1: Transcribe with Cloudflare AI Whisper
-    console.log(`[Worker] Running Whisper transcription`);
-    const whisperResponse = await env.AI.run('@cf/openai/whisper', {
-      audio: audioArray,
-    }) as any;
+    // Step 2: Transcribe audio with Whisper
+    console.log(`[Transcription] Running Whisper transcription...`);
+    const transcription = await transcriptionService.transcribeAudio(arrayBuffer);
+    const { text: transcript, language: detectedLanguage, confidence } = transcription;
 
-    const transcript = whisperResponse.result?.text || '';
-    const detectedLanguage = whisperResponse.result?.language || 'en';
+    console.log(`[Transcription] Whisper complete: ${transcript.length} chars, language: ${detectedLanguage}, confidence: ${confidence}`);
 
-    console.log(`[Worker] Transcription complete: ${transcript.length} chars, detected language: ${detectedLanguage}`);
-
-    // Step 2: Generate VTT for original language
+    // Step 3: Generate subtitles in requested languages
+    console.log(`[Transcription] Generating subtitles for ${languages.length} languages`);
     const subtitles: Record<string, string> = {};
-    subtitles[detectedLanguage] = generateVTT(transcript);
+    const translationResults: Record<string, string> = {};
 
-    // Step 3: Translate to other languages
-    console.log(`[Worker] Translating to ${languages.length} languages`);
+    // Add original language subtitle
+    subtitles[detectedLanguage] = transcriptionService.generateVTT(transcript, detectedLanguage);
+    console.log(`[Transcription] Generated subtitle for original language: ${detectedLanguage}`);
+
+    // Translate and generate subtitles for other languages
     for (const lang of languages) {
-      if (lang !== detectedLanguage) {
-        try {
-          const translationResponse = await env.AI.run('@cf/meta/m2m100-1.2b', {
-            text: transcript,
-            source_lang: detectedLanguageToM2M(detectedLanguage),
-            target_lang: languageCodeToM2M(lang)
-          }) as any;
+      if (lang === detectedLanguage) {
+        console.log(`[Transcription] Skipping ${lang} (same as source language)`);
+        continue;
+      }
 
-          const translatedText = translationResponse.result?.translated_text || transcript;
-          subtitles[lang] = generateVTT(translatedText);
-          console.log(`[Worker] Translated to ${lang}`);
-        } catch (err) {
-          console.error(`[Worker] Translation error for ${lang}:`, err);
-          // Fallback: use original transcript
-          subtitles[lang] = generateVTT(transcript);
-        }
+      if (!transcriptionService.isSupportedLanguage(lang)) {
+        console.warn(`[Transcription] Unsupported language: ${lang}, skipping`);
+        continue;
+      }
+
+      try {
+        console.log(`[Transcription] Translating to ${lang}...`);
+        const translatedText = await transcriptionService.translateText(
+          transcript,
+          lang,
+          detectedLanguage
+        );
+
+        subtitles[lang] = transcriptionService.generateVTT(translatedText, lang);
+        translationResults[lang] = translatedText;
+        console.log(`[Transcription] Translation complete for ${lang}`);
+      } catch (err) {
+        console.error(`[Transcription] Translation error for ${lang}:`, err);
+        // Fallback: use original transcript
+        subtitles[lang] = transcriptionService.generateVTT(transcript, lang);
       }
     }
 
-    // Step 4: Send back to Container to store
-    console.log(`[Worker] Sending results to Container`);
-    const storeResponse = await fetch('http://localhost:3000/api/store-transcript/' + videoId, {
+    // Step 4: Upload subtitles to R2
+    console.log(`[Transcription] Uploading ${Object.keys(subtitles).length} subtitles to R2`);
+    const r2SubtitleUrls: Record<string, string> = {};
+
+    for (const [lang, vttContent] of Object.entries(subtitles)) {
+      try {
+        const r2Url = await r2Service.uploadSubtitle(videoId, lang, vttContent);
+        r2SubtitleUrls[lang] = r2Url;
+        console.log(`[Transcription] R2 upload complete: ${lang}`);
+      } catch (err) {
+        console.error(`[Transcription] R2 upload error for ${lang}:`, err);
+        // Continue uploading other subtitles even if one fails
+      }
+    }
+
+    // Step 5: Store results in Container
+    console.log(`[Transcription] Storing results in container`);
+    const storeResponse = await fetch(`http://localhost:3000/api/store-transcript/${videoId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         transcript,
-        subtitles
+        subtitles,
+        r2SubtitleUrls,
+        translationResults,
+        detectedLanguage,
+        confidence,
+        processedLanguages: Object.keys(subtitles)
       })
     });
 
     if (!storeResponse.ok) {
-      console.error('[Worker] Failed to store transcript');
+      console.error('[Transcription] Failed to store transcript in container');
       throw new Error('Failed to store transcript in container');
     }
+
+    console.log(`[Transcription] Complete for ${videoId}: ${Object.keys(subtitles).length} subtitles generated`);
 
     return new Response(JSON.stringify({
       success: true,
       data: {
         videoId,
         title,
-        transcript,
-        subtitles
+        transcript: transcript.substring(0, 500) + '...', // 只返回前 500 字符
+        languages: Object.keys(subtitles),
+        detectedLanguage,
+        confidence,
+        r2SubtitleUrls
       }
     }), {
       status: 200,
@@ -929,7 +2102,7 @@ async function triggerTranscription(request: Request, env: Env) {
     });
 
   } catch (error) {
-    console.error('[Worker Transcription Error]', error);
+    console.error('[Transcription] Error:', error);
     return new Response(JSON.stringify({
       success: false,
       error: error instanceof Error ? error.message : 'Transcription failed'
