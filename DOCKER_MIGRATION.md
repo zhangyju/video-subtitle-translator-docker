@@ -99,7 +99,7 @@ wrangler login
 npm run docker:build
 
 # 3. 推送到 Cloudflare Container Registry
-wrangler publish
+wrangler deploy
 
 # 或者直接
 npm run deploy

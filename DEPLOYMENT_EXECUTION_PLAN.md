@@ -31,7 +31,7 @@ wrangler d1 execute video-subtitle-db --command \
 npm run build
 
 # 发布到 Cloudflare Workers
-wrangler publish
+wrangler deploy
 ```
 
 ### Step 3: 验证部署
@@ -120,7 +120,7 @@ docker push lvxiaoyu/video-subtitle-translator:latest
 # 快速回滚
 git revert HEAD
 git push
-wrangler publish
+wrangler deploy
 
 # 数据库回滚（如果需要）
 wrangler d1 execute video-subtitle-db --command \

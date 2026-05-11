@@ -78,7 +78,7 @@ wrangler d1 execute video-subtitle-db --command "SELECT name FROM sqlite_master 
 ### 3. Deploy Code
 ```bash
 # Deploy to Cloudflare Workers:
-wrangler publish
+wrangler deploy
 
 # Verify deployment:
 curl https://subtitle.myzhangyujie.com/api/progress/test
@@ -124,7 +124,7 @@ If issues occur:
 1. **Quick Rollback**
    ```bash
    # Revert to previous version
-   wrangler publish --env production --legacy-env false
+   wrangler deploy
    ```
 
 2. **Database Rollback**

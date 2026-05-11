@@ -53,7 +53,7 @@ wrangler d1 execute video-subtitle-db --command "SELECT name FROM sqlite_master 
 
 ```bash
 # Deploy to Cloudflare Workers
-wrangler publish
+wrangler deploy
 
 # Verify deployment
 curl https://subtitle.myzhangyujie.com/api/progress/test
@@ -122,7 +122,7 @@ wrangler d1 execute video-subtitle-db --command "SELECT COUNT(*) FROM language_s
 
 ```bash
 # Update Workers code
-wrangler publish
+wrangler deploy
 
 # Verify deployment successful
 curl -v https://subtitle.myzhangyujie.com/api/health
@@ -250,7 +250,7 @@ If critical issues occur:
 # Revert to previous version
 git revert HEAD
 git push
-wrangler publish
+wrangler deploy
 ```
 
 ### Full Rollback (if committed)
@@ -261,7 +261,7 @@ git revert HEAD -m 1
 git push
 
 # Redeploy
-wrangler publish
+wrangler deploy
 
 # If database issues, drop new tables
 wrangler d1 execute video-subtitle-db --command "DROP TABLE IF EXISTS audit_logs, transcription_progress, quota_resets, analytics_summary, language_statistics;"

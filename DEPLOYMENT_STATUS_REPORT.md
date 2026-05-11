@@ -68,7 +68,7 @@ ab098af Phase 7: Add deployment scripts and guides
 2. **编译和部署**
    ```bash
    npm run build
-   wrangler publish
+   wrangler deploy
    ```
 
 3. **验证**
@@ -218,7 +218,7 @@ wrangler d1 execute video-subtitle-db --command \
 wrangler d1 migrations apply video-subtitle-db
 
 # 2. 编译和部署
-npm run build && wrangler publish
+npm run build && wrangler deploy
 
 # 3. 验证
 curl https://subtitle.myzhangyujie.com/api/dashboard \
