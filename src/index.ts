@@ -1016,7 +1016,7 @@ class QuotaService {
       const user = await db
         .prepare('SELECT quota_storage_gb, storage_used_gb FROM users WHERE id = ?')
         .bind(userId)
-        .first<any>();
+        .first() as any;
 
       if (!user) {
         return { allowed: false, reason: 'User not found' };
@@ -1052,7 +1052,7 @@ class QuotaService {
           'SELECT quota_transcriptions, transcriptions_this_month FROM users WHERE id = ?'
         )
         .bind(userId)
-        .first<any>();
+        .first() as any;
 
       if (!user) {
         return { allowed: false, reason: 'User not found' };
@@ -1089,7 +1089,7 @@ class QuotaService {
           'SELECT quota_daily_processing_gb, processing_today_gb, processing_date_reset FROM users WHERE id = ?'
         )
         .bind(userId)
-        .first<any>();
+        .first() as any;
 
       if (!user) {
         return { allowed: false, reason: 'User not found' };
@@ -1231,7 +1231,7 @@ class QuotaService {
           FROM users WHERE id = ?`
         )
         .bind(userId)
-        .first<any>();
+        .first() as any;
 
       if (!user) {
         return null;
