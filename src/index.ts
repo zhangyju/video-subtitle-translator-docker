@@ -1883,7 +1883,274 @@ function generateAuthToken(userId: string): string {
   return Buffer.from(JSON.stringify(payload)).toString('base64');
 }
 
+async function handleDashboard(request: Request, env: Env, userId: string) {
+  try {
+    const db = env.DB as any;
+    const user = await db.prepare('SELECT id, email, quota_storage_gb, storage_used_gb FROM users WHERE id = ?').bind(userId).first() as any;
+    
+    if (!user) {
+      return new Response(JSON.stringify({ success: false, error: 'User not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
 
+    const videos = await db.prepare(`
+      SELECT v.id, v.title, v.file_size, v.created_at, v.status,
+             GROUP_CONCAT(s.language) as languages,
+             COUNT(s.id) as subtitle_count
+      FROM videos v
+      LEFT JOIN subtitles s ON v.id = s.video_id
+      WHERE v.user_id = ?
+      GROUP BY v.id
+      ORDER BY v.created_at DESC
+    `).bind(userId).all() as any;
+
+    const storagePercent = Math.round((user.storage_used_gb / user.quota_storage_gb) * 100);
+
+    return new Response(JSON.stringify({
+      success: true,
+      data: {
+        user: {
+          id: user.id,
+          email: user.email,
+          quotaStorage: user.quota_storage_gb,
+          storageUsed: user.storage_used_gb,
+          storagePercent: Math.min(storagePercent, 100)
+        },
+        videos: videos.results || [],
+        stats: {
+          totalVideos: videos.results?.length || 0,
+          completedVideos: videos.results?.filter((v: any) => v.status === 'completed').length || 0,
+          failedVideos: videos.results?.filter((v: any) => v.status === 'failed').length || 0
+        }
+      }
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    console.error('[Dashboard] Error:', error);
+    return new Response(JSON.stringify({
+      success: false,
+      error: error instanceof Error ? error.message : 'Dashboard error'
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+async function handleAnalytics(request: Request, env: Env, userId: string) {
+  try {
+    const db = env.DB as any;
+    const user = await db.prepare('SELECT id FROM users WHERE id = ?').bind(userId).first() as any;
+    
+    if (!user) {
+      return new Response(JSON.stringify({ success: false, error: 'User not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    const videos = await db.prepare('SELECT COUNT(*) as total FROM videos WHERE user_id = ?').bind(userId).first() as any;
+    const completed = await db.prepare('SELECT COUNT(*) as total FROM videos WHERE user_id = ? AND status = "completed"').bind(userId).first() as any;
+    const failed = await db.prepare('SELECT COUNT(*) as total FROM videos WHERE user_id = ? AND status = "failed"').bind(userId).first() as any;
+
+    const totalVideos = videos.total || 0;
+    const completedVideos = completed.total || 0;
+    const failedVideos = failed.total || 0;
+    const successRate = totalVideos > 0 ? ((completedVideos / totalVideos) * 100).toFixed(2) : '0.00';
+
+    return new Response(JSON.stringify({
+      success: true,
+      data: {
+        summary: {
+          totalVideos,
+          completedVideos,
+          failedVideos,
+          successRate: parseFloat(successRate as string)
+        }
+      }
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    console.error('[Analytics] Error:', error);
+    return new Response(JSON.stringify({
+      success: false,
+      error: error instanceof Error ? error.message : 'Analytics error'
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+function getDashboardHTML(): string {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>用户仪表板 - 视频字幕翻译器</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f7fa;
+            color: #333;
+        }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .stat-label { color: #666; font-size: 14px; margin-bottom: 8px; }
+        .stat-value { font-size: 28px; font-weight: bold; color: #667eea; }
+        .progress-bar {
+            height: 8px;
+            background: #eee;
+            border-radius: 4px;
+            margin-top: 10px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+        }
+        .videos-list {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: auto;
+        }
+        .video-item {
+            padding: 15px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .video-info h3 { font-size: 16px; margin-bottom: 5px; }
+        .video-meta { color: #999; font-size: 12px; }
+        .status-badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .status-completed { background: #d4edda; color: #155724; }
+        .status-processing { background: #fff3cd; color: #856404; }
+        .status-failed { background: #f8d7da; color: #721c24; }
+        .error { color: #721c24; padding: 20px; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>用户仪表板</h1>
+            <p>管理你的视频和字幕</p>
+        </div>
+
+        <div id="content">
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="stat-label">存储使用</div>
+                    <div class="stat-value" id="storage">-</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="storageBar" style="width: 0%"></div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">总视频数</div>
+                    <div class="stat-value" id="videoCount">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">完成数</div>
+                    <div class="stat-value" id="completedCount">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">成功率</div>
+                    <div class="stat-value" id="successRate">-</div>
+                </div>
+            </div>
+
+            <div class="videos-list" id="videosList">
+                <div style="padding: 20px; text-align: center; color: #999;">加载中...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const userId = localStorage.getItem('userId');
+        if (!userId) {
+            document.getElementById('content').innerHTML = '<div class="error">请先登录</div>';
+        } else {
+            loadDashboard();
+        }
+
+        async function loadDashboard() {
+            try {
+                const response = await fetch('/api/dashboard', {
+                    headers: { 'x-user-id': userId }
+                });
+                const result = await response.json();
+
+                if (result.success) {
+                    const data = result.data;
+                    document.getElementById('storage').textContent = data.user.storagePercent + '%';
+                    document.getElementById('storageBar').style.width = data.user.storagePercent + '%';
+                    document.getElementById('videoCount').textContent = data.stats.totalVideos;
+                    document.getElementById('completedCount').textContent = data.stats.completedVideos;
+                    const rate = data.stats.totalVideos > 0 ? (data.stats.completedVideos / data.stats.totalVideos * 100).toFixed(1) : 0;
+                    document.getElementById('successRate').textContent = rate + '%';
+
+                    const videosList = document.getElementById('videosList');
+                    if (data.videos.length === 0) {
+                        videosList.innerHTML = '<div style="padding: 20px; text-align: center; color: #999;">还没有视频</div>';
+                    } else {
+                        videosList.innerHTML = data.videos.map(v => \`
+                            <div class="video-item">
+                                <div class="video-info">
+                                    <h3>\${v.title}</h3>
+                                    <div class="video-meta">
+                                        大小: \${(v.file_size / 1024 / 1024).toFixed(2)}MB | 
+                                        字幕: \${v.subtitle_count || 0} | 
+                                        创建: \${new Date(v.created_at).toLocaleDateString()}
+                                    </div>
+                                </div>
+                                <span class="status-badge status-\${v.status}">\${v.status}</span>
+                            </div>
+                        \`).join('');
+                    }
+                } else {
+                    document.getElementById('content').innerHTML = '<div class="error">加载失败: ' + result.error + '</div>';
+                }
+            } catch (error) {
+                document.getElementById('content').innerHTML = '<div class="error">加载出错: ' + error.message + '</div>';
+            }
+        }
+    </script>
+</body>
+</html>`;
+}
 
 export default {
   async fetch(request: Request, env: Env, _ctx: any) {
@@ -1913,10 +2180,51 @@ export default {
         return await triggerTranscription(request, env);
       }
 
-      // Forward all other requests to container
-      const container = getContainer(env.CONTAINER, "default");
-      const response = await container.fetch(request);
-      return response;
+      // Handle Dashboard page
+      if (url.pathname === '/dashboard' && request.method === 'GET') {
+        const dashboardHTML = getDashboardHTML();
+        return new Response(dashboardHTML, {
+          status: 200,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        });
+      }
+
+      // Handle Dashboard API
+      if (url.pathname === '/api/dashboard' && request.method === 'GET') {
+        const userId = request.headers.get('x-user-id');
+        if (!userId) {
+          return new Response(JSON.stringify({ success: false, error: 'Missing x-user-id header' }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        return await handleDashboard(request, env, userId);
+      }
+
+      // Handle Analytics API
+      if (url.pathname === '/api/analytics' && request.method === 'GET') {
+        const userId = request.headers.get('x-user-id');
+        if (!userId) {
+          return new Response(JSON.stringify({ success: false, error: 'Missing x-user-id header' }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        return await handleAnalytics(request, env, userId);
+      }
+
+      // Forward all other requests to container (if available)
+      try {
+        const container = getContainer(env.CONTAINER, "default");
+        const response = await container.fetch(request);
+        return response;
+      } catch (error) {
+        // If container is not available, return 404
+        return new Response(JSON.stringify({ success: false, error: 'Not found' }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
     } catch (error) {
       console.error("[Error]", error);
       return new Response(
