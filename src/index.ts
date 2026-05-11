@@ -1,5 +1,9 @@
 import { Container, getContainer } from "@cloudflare/containers";
 
+// Type definitions for Cloudflare bindings
+type R2Bucket = any;
+type D1Database = any;
+
 interface Env {
   CONTAINER: any;
   AI: any;
@@ -828,7 +832,7 @@ class R2StorageService {
       const listResponse = await this.bucket.list({ prefix });
 
       // 删除所有匹配的文件
-      const deletePromises = listResponse.objects.map((obj) =>
+      const deletePromises = listResponse.objects.map((obj: any) =>
         this.bucket.delete(obj.key)
       );
 
