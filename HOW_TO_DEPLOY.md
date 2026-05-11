@@ -88,7 +88,7 @@ wrangler d1 execute video-subtitle-db --command \
 
 ### Step 4: 部署到 Cloudflare Workers
 ```bash
-wrangler publish
+wrangler deploy
 ```
 
 ### Step 5: 验证部署
@@ -137,7 +137,7 @@ wrangler d1 execute video-subtitle-db --command \
 cat wrangler.toml
 
 # 尝试重新部署
-wrangler publish --compatibilityDate 2024-05-11
+wrangler deploy
 ```
 
 ---
@@ -182,7 +182,7 @@ wrangler tail --format pretty
 ```bash
 # 回滚代码
 git revert HEAD
-wrangler publish
+wrangler deploy
 
 # 删除新的数据库表（可选）
 wrangler d1 execute video-subtitle-db --command \
@@ -233,7 +233,7 @@ A: 不会，迁移只添加新表。现有的 users、videos 等表保持不变�
 A: 检查 audit_logs 表，应该记录所有上传和转录操作。
 
 **Q: 可以回滚吗？**
-A: 可以，使用 `git revert HEAD` 和 `wrangler publish` 回滚代码。数据库表需要手动删除。
+A: 可以，使用 `git revert HEAD` 和 `wrangler deploy` 回滚代码。数据库表需要手动删除。
 
 ---
 

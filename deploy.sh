@@ -82,8 +82,8 @@ fi
 
 echo ""
 echo -e "${YELLOW}Step 5: Deploying to Cloudflare Workers...${NC}"
-echo "  Command: wrangler publish"
-wrangler publish
+echo "  Command: wrangler deploy"
+wrangler deploy
 echo -e "${GREEN}✓ Deployed to Cloudflare Workers${NC}"
 
 echo ""
